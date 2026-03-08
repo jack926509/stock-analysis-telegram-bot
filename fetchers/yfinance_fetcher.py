@@ -1,6 +1,7 @@
 """
-yfinance 基本面數據抓取模組
+yfinance 基本面數據抓取模組（優化版）
 使用 yfinance 取得公司基本面資訊。
+新增：成交量、Beta 值、營收成長率、盈餘成長率。
 """
 
 import asyncio
@@ -28,6 +29,34 @@ def _format_market_cap(market_cap) -> str:
             return f"${cap / 1e6:.2f}M"
         else:
             return f"${cap:,.0f}"
+    except (ValueError, TypeError):
+        return "N/A"
+
+
+def _format_large_number(value) -> str:
+    """格式化大數字（如成交量、營收）為易讀字串。"""
+    if value == "N/A" or value is None:
+        return "N/A"
+    try:
+        num = float(value)
+        if num >= 1e9:
+            return f"{num / 1e9:.2f}B"
+        elif num >= 1e6:
+            return f"{num / 1e6:.2f}M"
+        elif num >= 1e3:
+            return f"{num / 1e3:.1f}K"
+        else:
+            return f"{num:,.0f}"
+    except (ValueError, TypeError):
+        return "N/A"
+
+
+def _format_percentage(value) -> str:
+    """格式化小數為百分比。"""
+    if value == "N/A" or value is None:
+        return "N/A"
+    try:
+        return f"{float(value) * 100:.2f}%"
     except (ValueError, TypeError):
         return "N/A"
 
@@ -62,26 +91,38 @@ async def fetch_yfinance_fundamentals(ticker: str) -> dict:
             "company_name": _safe_get(info, "longName"),
             "sector": _safe_get(info, "sector"),
             "industry": _safe_get(info, "industry"),
+            # 市值
             "market_cap_raw": raw_market_cap,
             "market_cap": _format_market_cap(raw_market_cap),
+            # 估值指標
             "pe_ratio": _safe_get(info, "trailingPE"),
             "forward_pe": _safe_get(info, "forwardPE"),
             "eps": _safe_get(info, "trailingEps"),
+            "peg_ratio": _safe_get(info, "pegRatio"),
+            # 收益指標
             "dividend_yield": (
                 f"{info['dividendYield'] * 100:.2f}%"
                 if info.get("dividendYield")
                 else "N/A"
             ),
+            "profit_margin": _format_percentage(info.get("profitMargins")),
+            # 成長指標（分析師新增要求）
+            "revenue_growth": _format_percentage(info.get("revenueGrowth")),
+            "earnings_growth": _format_percentage(info.get("earningsGrowth")),
+            # 價格區間
             "52w_high": _safe_get(info, "fiftyTwoWeekHigh"),
             "52w_low": _safe_get(info, "fiftyTwoWeekLow"),
             "50d_avg": _safe_get(info, "fiftyDayAverage"),
             "200d_avg": _safe_get(info, "twoHundredDayAverage"),
-            "revenue": _safe_get(info, "totalRevenue"),
-            "profit_margin": (
-                f"{info['profitMargins'] * 100:.2f}%"
-                if info.get("profitMargins")
-                else "N/A"
-            ),
+            # 成交量（分析師新增要求）
+            "volume": _format_large_number(info.get("volume")),
+            "avg_volume": _format_large_number(info.get("averageVolume")),
+            "avg_volume_10d": _format_large_number(info.get("averageDailyVolume10Day")),
+            # 風險指標（分析師新增要求）
+            "beta": _safe_get(info, "beta"),
+            # 營收
+            "revenue": _format_large_number(info.get("totalRevenue")),
+            # 公司簡介
             "business_summary": (
                 info.get("longBusinessSummary", "N/A")[:300] + "..."
                 if info.get("longBusinessSummary") and len(info.get("longBusinessSummary", "")) > 300
