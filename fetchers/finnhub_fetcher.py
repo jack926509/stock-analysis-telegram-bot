@@ -10,6 +10,17 @@ import finnhub
 
 from config import Config
 
+# 後端優化：共用 client 實例，避免每次請求重建
+_finnhub_client: finnhub.Client | None = None
+
+
+def _get_client() -> finnhub.Client:
+    """取得共用的 Finnhub client。"""
+    global _finnhub_client
+    if _finnhub_client is None:
+        _finnhub_client = finnhub.Client(api_key=Config.FINNHUB_API_KEY)
+    return _finnhub_client
+
 
 async def fetch_finnhub_quote(ticker: str) -> dict:
     """
@@ -22,7 +33,7 @@ async def fetch_finnhub_quote(ticker: str) -> dict:
         dict: 包含即時股價數據，缺失值標記為 "N/A"
     """
     try:
-        client = finnhub.Client(api_key=Config.FINNHUB_API_KEY)
+        client = _get_client()
         quote = await asyncio.to_thread(client.quote, ticker.upper())
 
         if not quote or quote.get("c", 0) == 0:

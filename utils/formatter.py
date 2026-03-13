@@ -114,6 +114,66 @@ def _data_quality_score(finnhub, yfinance, tavily, tradingview):
     return f"[{bar}] {available}/{total}", sources
 
 
+def _trend_arrows(price, ema20, sma50, sma200) -> str:
+    """生成均線趨勢排列判斷。"""
+    try:
+        p = float(price)
+        e20 = float(ema20)
+        s50 = float(sma50)
+        s200 = float(sma200)
+    except (ValueError, TypeError):
+        return ""
+
+    if p > e20 > s50 > s200:
+        return "🟢 多頭排列"
+    elif p < e20 < s50 < s200:
+        return "🔴 空頭排列"
+    elif p > s200:
+        return "🟡 偏多整理"
+    else:
+        return "🟡 偏空整理"
+
+
+def _quick_summary(finnhub_data, yfinance_data, tradingview_data) -> str:
+    """生成快速摘要區塊，讓讀者 3 秒掌握重點。"""
+    parts = []
+
+    # 漲跌
+    change_pct = finnhub_data.get("change_percent", "N/A")
+    if isinstance(change_pct, (int, float)):
+        if change_pct >= 0:
+            parts.append(f"🟢 +{change_pct}%")
+        else:
+            parts.append(f"🔴 {change_pct}%")
+
+    # 技術建議
+    rec = tradingview_data.get("recommendation", "N/A")
+    if rec != "N/A":
+        parts.append(_recommendation_display(rec))
+
+    # RSI 狀態
+    rsi = tradingview_data.get("rsi_14", "N/A")
+    if rsi != "N/A":
+        try:
+            rsi_val = float(rsi)
+            parts.append(f"RSI {rsi_val:.0f}{_rsi_label(rsi)}")
+        except (ValueError, TypeError):
+            pass
+
+    # 均線趨勢
+    price = finnhub_data.get("current_price", "N/A")
+    ema20 = tradingview_data.get("ema_20", "N/A")
+    sma50 = tradingview_data.get("sma_50", "N/A")
+    sma200 = tradingview_data.get("sma_200", "N/A")
+    trend = _trend_arrows(price, ema20, sma50, sma200)
+    if trend:
+        parts.append(trend)
+
+    if not parts:
+        return ""
+    return " | ".join(parts)
+
+
 def _volume_analysis(yfinance_data: dict) -> str:
     """量能分析視覺化。"""
     volume = yfinance_data.get("volume", "N/A")
@@ -185,6 +245,12 @@ def format_report(
     if sector_line:
         report_parts.append(sector_line)
 
+    # 快速摘要（3 秒掌握重點）
+    if "error" not in finnhub_data and "error" not in tradingview_data:
+        summary = _quick_summary(finnhub_data, yfinance_data, tradingview_data)
+        if summary:
+            report_parts.append(f"⚡ {summary}")
+
     # 數據品質
     quality_score, quality_sources = _data_quality_score(
         finnhub_data, yfinance_data, tavily_data, tradingview_data
@@ -238,7 +304,8 @@ def format_report(
         pe_hint = ""
         try:
             if pe != "N/A" and fpe != "N/A":
-                pe_hint = " 📉成長預期" if float(fpe) < float(pe) else " 📈獲利放緩"
+                # Forward PE < Trailing PE → 市場預期未來獲利成長（EPS↑ 使 PE↓）
+                pe_hint = " 📈成長預期" if float(fpe) < float(pe) else " 📉成長放緩"
         except (ValueError, TypeError):
             pass
 
@@ -254,6 +321,13 @@ def format_report(
         earn_growth = yfinance_data.get("earnings_growth", "N/A")
         if rev_growth != "N/A" or earn_growth != "N/A":
             report_parts.append(f"  營收成長: {rev_growth}  盈餘成長: {earn_growth}")
+
+        # 籌碼面
+        short_ratio = yfinance_data.get("short_ratio", "N/A")
+        inst_pct = yfinance_data.get("held_pct_institutions", "N/A")
+        if short_ratio != "N/A" or inst_pct != "N/A":
+            report_parts.append(f"  空頭比率: {_safe_value(short_ratio)}  "
+                               f"機構持股: {inst_pct}")
 
         # 價格區間
         report_parts.append(f"  52W: ${_format_number(yfinance_data.get('52w_low'))} ~ "
@@ -303,10 +377,25 @@ def format_report(
         report_parts.append(f"  MACD: {tradingview_data.get('macd', 'N/A')}  "
                            f"Signal: {tradingview_data.get('macd_signal', 'N/A')}")
 
-        # 均線
-        report_parts.append(f"  EMA20: ${_format_number(tradingview_data.get('ema_20'))}  "
-                           f"SMA50: ${_format_number(tradingview_data.get('sma_50'))}  "
-                           f"SMA200: ${_format_number(tradingview_data.get('sma_200'))}")
+        # 均線 + 趨勢排列
+        ema20 = tradingview_data.get('ema_20')
+        sma50 = tradingview_data.get('sma_50')
+        sma200 = tradingview_data.get('sma_200')
+        report_parts.append(f"  EMA20: ${_format_number(ema20)}  "
+                           f"SMA50: ${_format_number(sma50)}  "
+                           f"SMA200: ${_format_number(sma200)}")
+
+        # 均線趨勢判斷
+        price = finnhub_data.get("current_price", "N/A") if "error" not in finnhub_data else "N/A"
+        trend = _trend_arrows(price, ema20, sma50, sma200)
+        if trend:
+            report_parts.append(f"  趨勢: {trend}")
+
+        # 布林通道
+        bb_upper = tradingview_data.get("bb_upper", "N/A")
+        bb_lower = tradingview_data.get("bb_lower", "N/A")
+        if bb_upper != "N/A" and bb_lower != "N/A":
+            report_parts.append(f"  布林: ${_format_number(bb_upper)} ~ ${_format_number(bb_lower)}")
 
         # 子類別建議
         ma_rec = tradingview_data.get("moving_averages", {}).get("recommendation", "N/A")

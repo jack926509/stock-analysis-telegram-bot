@@ -120,6 +120,11 @@ async def fetch_yfinance_fundamentals(ticker: str) -> dict:
             "avg_volume_10d": _format_large_number(info.get("averageDailyVolume10Day")),
             # 風險指標（分析師新增要求）
             "beta": _safe_get(info, "beta"),
+            # 籌碼面
+            "short_ratio": _safe_get(info, "shortRatio"),
+            "short_pct_float": _format_percentage(info.get("shortPercentOfFloat")),
+            "held_pct_insiders": _format_percentage(info.get("heldPercentInsiders")),
+            "held_pct_institutions": _format_percentage(info.get("heldPercentInstitutions")),
             # 營收
             "revenue": _format_large_number(info.get("totalRevenue")),
             # 公司簡介

@@ -27,6 +27,7 @@ def main():
 
     # 建立並啟動 Bot
     logger.info("🚀 正在啟動零幻覺美股分析 Bot...")
+    logger.info(f"📦 AI 模型: {Config.OPENAI_MODEL}")
     app = create_bot_application()
 
     logger.info("✅ Bot 已啟動！等待指令中...")

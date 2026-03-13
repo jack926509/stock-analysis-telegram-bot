@@ -87,6 +87,26 @@ async def fetch_tradingview_analysis(ticker: str) -> dict:
                         if indicators.get("Stoch.K") is not None
                         else "N/A"
                     ),
+                    "stoch_d": (
+                        round(indicators.get("Stoch.D", 0), 2)
+                        if indicators.get("Stoch.D") is not None
+                        else "N/A"
+                    ),
+                    "bb_upper": (
+                        round(indicators.get("BB.upper", 0), 2)
+                        if indicators.get("BB.upper") is not None
+                        else "N/A"
+                    ),
+                    "bb_lower": (
+                        round(indicators.get("BB.lower", 0), 2)
+                        if indicators.get("BB.lower") is not None
+                        else "N/A"
+                    ),
+                    "atr": (
+                        round(indicators.get("ATR", 0), 4)
+                        if indicators.get("ATR") is not None
+                        else "N/A"
+                    ),
                     "moving_averages": {
                         "recommendation": (
                             analysis.moving_averages.get("RECOMMENDATION", "N/A")
