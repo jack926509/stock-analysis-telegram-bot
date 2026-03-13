@@ -1,6 +1,7 @@
 """
 設定管理模組
 集中管理所有環境變數與應用設定。
+支援 dev/staging/production 環境配置。
 """
 
 import os
@@ -13,18 +14,42 @@ load_dotenv()
 class Config:
     """應用程式設定"""
 
-    # Telegram
-    TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    # ── 環境 ──
+    ENV: str = os.getenv("APP_ENV", "production")  # dev / staging / production
 
-    # Finnhub
+    # ── Telegram ──
+    TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    BOT_MODE: str = os.getenv("BOT_MODE", "polling")  # polling / webhook
+    WEBHOOK_URL: str = os.getenv("WEBHOOK_URL", "")  # Webhook 模式需要設定
+
+    # ── Finnhub ──
     FINNHUB_API_KEY: str = os.getenv("FINNHUB_API_KEY", "")
 
-    # Tavily
+    # ── Tavily ──
     TAVILY_API_KEY: str = os.getenv("TAVILY_API_KEY", "")
 
-    # OpenAI
+    # ── OpenAI ──
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
     OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-4o")
+
+    # ── 健康檢查 ──
+    HEALTH_PORT: int = int(os.getenv("HEALTH_PORT", "8080"))
+    HEALTH_ENABLED: bool = os.getenv("HEALTH_ENABLED", "true").lower() == "true"
+
+    # ── Rate Limiting ──
+    RATE_LIMIT_PER_MINUTE: int = int(os.getenv("RATE_LIMIT_PER_MINUTE", "5"))
+
+    # ── 資料庫 ──
+    DB_PATH: str = os.getenv("DB_PATH", "bot_data.db")
+
+    # ── 快取 ──
+    CACHE_TTL: int = int(os.getenv("CACHE_TTL", "300"))  # 秒
+
+    # ── 同業比較 ──
+    PEER_COMPARISON_ENABLED: bool = os.getenv("PEER_COMPARISON_ENABLED", "true").lower() == "true"
+
+    # ── 歷史回測 ──
+    HISTORY_ENABLED: bool = os.getenv("HISTORY_ENABLED", "true").lower() == "true"
 
     @classmethod
     def validate(cls) -> None:
@@ -39,7 +64,18 @@ class Config:
         if not cls.OPENAI_API_KEY:
             missing.append("OPENAI_API_KEY")
 
+        if cls.BOT_MODE == "webhook" and not cls.WEBHOOK_URL:
+            missing.append("WEBHOOK_URL (webhook 模式必需)")
+
         if missing:
             print(f"❌ 缺少必要環境變數: {', '.join(missing)}")
             print("請在 .env 檔案中設定以上變數（參考 .env.example）")
             sys.exit(1)
+
+    @classmethod
+    def is_dev(cls) -> bool:
+        return cls.ENV == "dev"
+
+    @classmethod
+    def is_production(cls) -> bool:
+        return cls.ENV == "production"

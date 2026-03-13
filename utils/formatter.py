@@ -219,6 +219,121 @@ def _volume_analysis(yfinance_data: dict) -> str:
     return "\n".join(lines)
 
 
+def _format_return(val) -> str:
+    """格式化報酬率。"""
+    if val == "N/A" or val is None:
+        return "N/A"
+    try:
+        v = float(val)
+        emoji = "🟢" if v >= 0 else "🔴"
+        return f"{emoji} {v:+.2f}%"
+    except (ValueError, TypeError):
+        return "N/A"
+
+
+def _format_sr_section(history_data: dict) -> list[str]:
+    """格式化支撐壓力位區塊。"""
+    sr = history_data.get("support_resistance", {})
+    if not sr:
+        return []
+
+    lines = []
+    lines.append("")
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append("🎯 *支撐壓力位*")
+
+    if "resistance_20d" in sr:
+        lines.append(f"  短期壓力: ${_format_number(sr['resistance_20d'])}  "
+                     f"支撐: ${_format_number(sr['support_20d'])}")
+    if "resistance_60d" in sr:
+        lines.append(f"  中期壓力: ${_format_number(sr['resistance_60d'])}  "
+                     f"支撐: ${_format_number(sr['support_60d'])}")
+
+    # 動態均線參考
+    parts = []
+    if "sma20" in sr:
+        parts.append(f"SMA20(${_format_number(sr['sma20'])})={sr['sma20_position']}")
+    if "sma50" in sr:
+        parts.append(f"SMA50(${_format_number(sr['sma50'])})={sr['sma50_position']}")
+    if parts:
+        lines.append(f"  動態: {' | '.join(parts)}")
+
+    return lines
+
+
+def _format_history_section(history_data: dict) -> list[str]:
+    """格式化歷史回測區塊。"""
+    if not history_data or "error" in history_data:
+        return []
+
+    lines = []
+    lines.append("")
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append("📉 *歷史回測*")
+
+    # 區間報酬率
+    ret_7d = _format_return(history_data.get("return_7d"))
+    ret_30d = _format_return(history_data.get("return_30d"))
+    ret_60d = _format_return(history_data.get("return_60d"))
+    ret_90d = _format_return(history_data.get("return_90d"))
+
+    lines.append(f"  7日: {ret_7d}  30日: {ret_30d}")
+    lines.append(f"  60日: {ret_60d}  90日: {ret_90d}")
+
+    # 波動率
+    vol = history_data.get("volatility_30d", "N/A")
+    if vol != "N/A":
+        vol_label = "⚠️偏高" if float(vol) > 40 else ("中等" if float(vol) > 20 else "低")
+        lines.append(f"  30日年化波動: {vol}% ({vol_label})")
+
+    return lines
+
+
+def _format_peer_section(peer_data: dict, yfinance_data: dict) -> list[str]:
+    """格式化同業比較區塊。"""
+    if not peer_data or "error" in peer_data:
+        return []
+
+    lines = []
+    lines.append("")
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append("🏢 *同業比較*")
+
+    peers_str = " ".join(peer_data.get("peers", []))
+    lines.append(f"  比較對象: {peers_str}")
+
+    # 與同業平均對比
+    avg_pe = peer_data.get("sector_avg_pe", "N/A")
+    my_pe = yfinance_data.get("pe_ratio", "N/A")
+    if avg_pe != "N/A" and my_pe != "N/A":
+        try:
+            diff = ((float(my_pe) / float(avg_pe)) - 1) * 100
+            hint = "偏高" if diff > 10 else ("偏低" if diff < -10 else "接近")
+            lines.append(f"  PE: {_format_number(my_pe)} vs 同業 {_format_number(avg_pe)} ({hint})")
+        except (ValueError, TypeError):
+            pass
+
+    avg_margin = peer_data.get("sector_avg_profit_margin", "N/A")
+    my_margin = yfinance_data.get("profit_margin", "N/A")
+    if avg_margin != "N/A" and my_margin != "N/A":
+        try:
+            avg_pct = f"{float(avg_margin) * 100:.2f}%"
+            lines.append(f"  利潤率: {my_margin} vs 同業 {avg_pct}")
+        except (ValueError, TypeError):
+            pass
+
+    avg_growth = peer_data.get("sector_avg_revenue_growth", "N/A")
+    my_growth = yfinance_data.get("revenue_growth", "N/A")
+    if avg_growth != "N/A" and my_growth != "N/A":
+        try:
+            avg_pct = f"{float(avg_growth) * 100:.2f}%"
+            lines.append(f"  營收成長: {my_growth} vs 同業 {avg_pct}")
+        except (ValueError, TypeError):
+            pass
+
+    return lines
+
+
 def format_report(
     ticker: str,
     finnhub_data: dict,
@@ -226,9 +341,11 @@ def format_report(
     tavily_data: dict,
     tradingview_data: dict,
     ai_analysis: str,
+    history_data: dict | None = None,
+    peer_data: dict | None = None,
 ) -> str:
     """
-    組裝完整的分析報告（三角色優化版）。
+    組裝完整的分析報告（三角色優化版 v3）。
     """
     report_parts = []
 
@@ -405,6 +522,15 @@ def format_report(
                                f"震盪: {_recommendation_display(osc_rec)}")
     else:
         report_parts.append(f"  ⚠️ {tradingview_data['error']}")
+
+    # ══ 歷史回測 ══
+    if history_data:
+        report_parts.extend(_format_history_section(history_data))
+        report_parts.extend(_format_sr_section(history_data))
+
+    # ══ 同業比較 ══
+    if peer_data:
+        report_parts.extend(_format_peer_section(peer_data, yfinance_data))
 
     # ══ 新聞 ══
     report_parts.append("")

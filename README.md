@@ -13,22 +13,27 @@
 
 ## ✨ 功能特色
 
-- 🔍 **多源數據整合** — 並行抓取 4 大數據源，全面涵蓋股票分析所需資訊
+- 🔍 **多源數據整合** — 並行抓取 6 大數據源（即時股價、基本面、技術指標、新聞、歷史回測、同業比較）
 - 🛡️ **反幻覺機制** — 四層防護確保 AI 分析 100% 基於真實數據
 - ⚡ **非同步並行** — 使用 `asyncio.gather()` 並行抓取，大幅降低響應延遲
 - 📊 **美觀報告** — 結構化 Markdown 報告，原始數據 + AI 分析一目瞭然
-- 🧠 **深度分析** — 基本面、技術面、量能、籌碼面、市場情緒五維度交叉驗證
+- 🧠 **深度分析** — 基本面、技術面、量能、籌碼面、歷史回測、同業比較、市場情緒七維度交叉驗證
+- 📋 **自選股清單** — 個人化追蹤清單，快速查閱常用標的
+- 🔒 **ETF 支援** — 支援 SPY、QQQ 等 ETF 分析
+- 🏥 **健康監控** — HTTP `/health` 端點，支援 Zeabur 服務監控
 
 ---
 
 ## 📐 系統架構
 
 ```
-使用者 ──▶ Telegram Bot ──▶ 數據檢索層 (並行)  ──▶ AI 分析層 ──▶ 格式化報告
-                             ├── Finnhub    (即時股價)
-                             ├── yfinance   (基本面)
-                             ├── Tavily     (真實新聞)
-                             └── TradingView(技術指標)
+使用者 ──▶ Telegram Bot ──▶ Rate Limiter ──▶ 數據檢索層 (並行)  ──▶ AI 分析層 ──▶ 格式化報告
+                                               ├── Finnhub     (即時股價)
+                                               ├── yfinance    (基本面)
+                                               ├── TradingView (技術指標)
+                                               ├── Tavily      (真實新聞)
+                                               ├── yfinance    (歷史回測)
+                                               └── yfinance    (同業比較)
 ```
 
 ### 反幻覺四層防護
@@ -46,8 +51,8 @@
 
 ```
 stock_bot_project/
-├── main.py                    # 程式進入點
-├── config.py                  # 設定管理（讀取 .env）
+├── main.py                    # 程式進入點（Graceful Shutdown + 健康檢查）
+├── config.py                  # 設定管理（多環境支援）
 ├── requirements.txt           # Python 套件清單
 ├── .env.example               # 環境變數範本
 ├── Procfile                   # Zeabur 部署設定
@@ -56,13 +61,18 @@ stock_bot_project/
 │   ├── finnhub_fetcher.py     #   即時股價 (Finnhub API)
 │   ├── yfinance_fetcher.py    #   基本面數據 (yfinance)
 │   ├── tavily_fetcher.py      #   真實新聞 (Tavily Search)
-│   └── tradingview_fetcher.py #   技術指標 (TradingView-TA)
+│   ├── tradingview_fetcher.py #   技術指標 (TradingView-TA)
+│   ├── history_fetcher.py     #   歷史回測 + 支撐壓力位
+│   └── peer_fetcher.py        #   同業比較
 ├── analyzer/                  # 🤖 AI 分析層
 │   └── openai_analyzer.py     #   OpenAI GPT 分析引擎
 ├── bot/                       # 💬 Telegram 介面層
 │   └── telegram_bot.py        #   Bot 指令處理
 └── utils/                     # 🔧 工具模組
-    └── formatter.py           #   報告格式化
+    ├── formatter.py           #   報告格式化
+    ├── database.py            #   SQLite 資料庫（自選股 + 查詢歷史）
+    ├── rate_limiter.py        #   Per-user 請求限制
+    └── health.py              #   HTTP 健康檢查端點
 ```
 
 ---
@@ -121,7 +131,16 @@ TAVILY_API_KEY=你的_Tavily_API_Key
 OPENAI_API_KEY=你的_OpenAI_API_Key
 ```
 
-4. 部署完成，Bot 自動啟動！
+4. 部署完成，Bot 自動啟動！（健康檢查端點自動在 8080 port 運行）
+
+### 進階部署設定
+
+```
+BOT_MODE=webhook                # 使用 Webhook 模式降低資源消耗
+WEBHOOK_URL=https://your-bot.zeabur.app
+APP_ENV=production              # 啟用結構化 JSON 日誌
+HEALTH_ENABLED=true             # 啟用 /health 端點
+```
 
 ---
 
@@ -133,63 +152,10 @@ OPENAI_API_KEY=你的_OpenAI_API_Key
 |------|------|------|
 | `/start` | 查看歡迎訊息與使用說明 | `/start` |
 | `/report [代碼]` | 產生完整股票分析報告 | `/report AAPL` |
-
-### 報告範例
-
-```
-📊 AAPL — Apple Inc.
-Technology | Consumer Electronics
-⚡ 🟢 +1.25% | 🟢 買入 | RSI 58 中性 | 🟢 多頭排列
-🔋 數據: [●●●●] 4/4 ✅Finnhub ✅yfinance ✅Tavily ✅TradingView
-━━━━━━━━━━━━━━━━━━━━━━━━
-
-💰 現價: $178.72  🟢 +1.25% (+$2.20)
-  高/低: $179.50 / $176.80  前收: $176.52
-  52W位置: [▓▓▓▓▓▓░░░░] 60%
-
-━━━━━━━━━━━━━━━━━━━━━━━━
-📈 基本面
-  市值: $2.78T  Beta: 1.24
-  PE: 28.50  Forward PE: 25.30 📈成長預期
-  EPS: $6.27  PEG: 1.85
-  殖利率: 0.55%  利潤率: 26.31%
-  營收成長: 8.12%  盈餘成長: 12.50%
-  空頭比率: 1.2  機構持股: 60.15%
-  52W: $143.90 ~ $199.62
-  50MA: $172.50  200MA: $168.30
-
-━━━━━━━━━━━━━━━━━━━━━━━━
-📦 量能分析
-  成交量: 65.2M
-  平均量: 58.1M
-  量比: 1.1x ➡️ 正常
-
-━━━━━━━━━━━━━━━━━━━━━━━━
-🔍 技術面信號
-  建議: 🟢 買入
-  🟢🟢🟢🟢🟢🟡🟡🟡🔴🔴 買12/中8/賣6
-  RSI: 58.32 中性  ADX: 28.50 強趨勢
-  MACD: 1.2345  Signal: 0.8765
-  EMA20: $176.50  SMA50: $172.50  SMA200: $168.30
-  趨勢: 🟢 多頭排列
-  布林: $182.30 ~ $170.10
-  均線: 🟢 買入  震盪: 🟡 中性
-
-━━━━━━━━━━━━━━━━━━━━━━━━
-📰 新聞
-  [AI 新聞摘要...]
-
-══════════════════════════
-🤖 AI 深度分析
-══════════════════════════
-
-[基於真實數據的五維度深度分析...]
-
-══════════════════════════
-⚠️ 本報告僅供參考研究，不構成投資建議。
-數據來源: Finnhub | yfinance | Tavily | TradingView
-📅 2026-03-13 12:00 UTC | 🛡️ Zero-Hallucination Engine
-```
+| `/report [ETF]` | 分析 ETF | `/report SPY` |
+| `/watchlist` | 查看自選股清單 | `/watchlist` |
+| `/watch [代碼]` | 加入自選股 | `/watch TSLA` |
+| `/unwatch [代碼]` | 移除自選股 | `/unwatch TSLA` |
 
 ---
 
@@ -203,9 +169,11 @@ Technology | Consumer Electronics
 | **python-telegram-bot** | Telegram Bot 框架 |
 | **OpenAI GPT-4o** | AI 分析引擎 |
 | **Finnhub** | 即時股價 API |
-| **yfinance** | 基本面數據 |
+| **yfinance** | 基本面 + 歷史數據 + 同業比較 |
 | **Tavily** | 新聞搜尋 API |
 | **TradingView-TA** | 技術指標分析 |
+| **SQLite** | 自選股 + 查詢歷史 |
+| **aiohttp** | 健康檢查 HTTP 端點 |
 | **asyncio** | 非同步並行處理 |
 
 ### 關鍵設計決策
@@ -218,40 +186,70 @@ Technology | Consumer Electronics
 | 模組化架構 | 數據源獨立，可輕鬆替換或擴展 |
 | Singleton 客戶端 | 避免重複建立 API 連線 |
 | 5 分鐘快取 | 防止短時間重複查詢浪費 API 額度 |
+| Per-user Rate Limiting | 防止單一使用者濫用（每分鐘 5 次） |
+| SQLite WAL 模式 | 高併發讀寫效能 |
+| Webhook 模式選項 | 降低 Zeabur 資源消耗 |
+
+### 環境配置
+
+| 變數 | 說明 | 預設 |
+|------|------|------|
+| `APP_ENV` | 環境（dev/staging/production） | production |
+| `BOT_MODE` | Bot 模式（polling/webhook） | polling |
+| `HEALTH_PORT` | 健康檢查端口 | 8080 |
+| `RATE_LIMIT_PER_MINUTE` | 每用戶每分鐘請求上限 | 5 |
+| `CACHE_TTL` | 快取存活時間（秒） | 300 |
+| `PEER_COMPARISON_ENABLED` | 啟用同業比較 | true |
+| `HISTORY_ENABLED` | 啟用歷史回測 | true |
 
 ---
 
 ## 📝 修改歷程 (Changelog)
 
+### v3.0 — 全面功能擴展 (2026-03-13)
+
+#### 🏦 美股分析師
+- **歷史數據回測**：新增 7/30/60/90 天區間報酬率、30 日年化波動率
+- **支撐壓力位計算**：基於近 20/60 日高低點 + SMA20/SMA50 動態支撐壓力
+- **同業比較**：自動抓取同產業 4 家代表公司，比較 PE、利潤率、營收成長
+- **ETF 支援**：ticker 驗證放寬，支援 SPY、QQQ、VOO 等 ETF
+- **System Prompt 強化**：新增歷史回測分析指引、同業對比維度
+
+#### 🎨 前端 UX/UI
+- **自選股清單**：`/watchlist`、`/watch`、`/unwatch` 三指令完整自選股管理
+- **歷史回測區塊**：顯示多時間區間報酬率 + 波動率
+- **支撐壓力位區塊**：短期/中期支撐壓力 + 動態均線參考
+- **同業比較區塊**：PE/利潤率/成長率 vs 同業平均
+
+#### ⚙️ 後端工程
+- **Webhook 模式**：新增 `BOT_MODE=webhook` 選項，降低 Zeabur 資源消耗
+- **SQLite 資料庫**：WAL 模式，存儲自選股清單與查詢歷史
+- **Per-user Rate Limiter**：滑動窗口限流，每分鐘 5 次（可配置）
+- **HTTP 健康檢查**：`/health` 端點，回報 uptime、請求計數，供 Zeabur 監控
+- **結構化 JSON 日誌**：production 環境自動啟用，便於日誌分析
+- **Graceful Shutdown**：信號處理，確保進行中的分析完成後才停止
+- **環境配置分離**：`APP_ENV` 支援 dev/staging/production 多環境
+- **降低第三方日誌噪音**：httpx/httpcore 等設為 WARNING 等級
+- **查詢記錄**：每次 `/report` 自動記入資料庫
+
 ### v2.1 — 三角色深度優化 v2 (2026-03-13)
 
 #### 🏦 美股分析師優化
-- **修正 PE 提示邏輯**：Forward PE < Trailing PE 顯示 📈成長預期（原為反向 emoji）
-- **強化 System Prompt**：
-  - 分析師角色升級為「縱橫華爾街 20 年」的實戰背景
-  - 新增 PEG 估值判斷框架（<1 低估 / 1-2 合理 / >2 偏高）
-  - 新增均線排列定義（多頭排列 vs 空頭排列條件）
-  - 新增布林通道、ATR 波動率分析指引
-  - 新增短線/中線操作建議輸出
-- **新增籌碼面數據**：空頭比率 (Short Ratio)、機構持股比例、內部人持股
-- **新增技術指標**：布林通道上下軌、Stochastic %D、ATR 波動率
+- 修正 PE 提示 emoji（Forward PE < Trailing PE → 📈成長預期）
+- 強化 System Prompt（20 年華爾街經驗、PEG 框架、均線排列定義）
+- 新增籌碼面數據（Short Ratio、機構持股）
+- 新增技術指標（布林通道、Stochastic %D、ATR）
 
 #### 🎨 前端 UX/UI 優化
-- **新增快速摘要欄位** `⚡`：報告頂部一行顯示漲跌、技術建議、RSI、均線趨勢
-- **新增均線趨勢判斷**：自動判斷多頭/空頭/偏多整理/偏空整理排列
-- **新增布林通道顯示**：技術面區塊顯示布林上下軌
-- **新增籌碼面區塊**：顯示空頭比率與機構持股
-- **PE 提示 emoji 修正**：成長預期使用 📈，放緩使用 📉
+- 新增快速摘要欄位 `⚡`（3 秒掌握重點）
+- 新增均線趨勢判斷（多頭/空頭排列）
+- 新增布林通道、籌碼面區塊
 
 #### ⚙️ 後端工程優化
-- **修復 Semaphore 並發控制 Bug**：原 `locked()` 方法在 Semaphore(3) 下僅在全部 3 slot 用完才觸發，改為直接檢查 `_value`
-- **新增 API 客戶端 Singleton 模式**：
-  - Finnhub Client → 共用實例（避免每次請求重建）
-  - Tavily Client → 共用實例
-  - OpenAI Client → 已有共用實例（保持）
-- **新增請求快取機制**：5 分鐘 TTL 快取，相同 ticker 短時間內不重複呼叫 API
-- **強化 Markdown 衝突清理**：新增底線 (`_斜體_`) 與反引號清理，降低 Telegram 解析失敗率
-- **啟動日誌增強**：顯示使用的 AI 模型名稱
+- 修復 Semaphore 並發控制 Bug
+- Singleton 客戶端（Finnhub、Tavily、OpenAI）
+- 5 分鐘 TTL 快取
+- Markdown 衝突清理強化
 
 ### v2.0 — 三角色深度優化 (2026-03-12)
 - 分析師：成交量分析、成長性評估、量化評分框架
@@ -272,29 +270,26 @@ Technology | Consumer Electronics
 ## 🔮 未來優化方向
 
 ### 分析師面
-- [ ] **歷史數據回測**：加入 yfinance 歷史 K 線，提供近 30/60/90 天報酬率
-- [ ] **同業比較**：抓取同產業 Top 5 公司 PE、成長率做橫向對比
 - [ ] **財報日曆**：標示下一次財報發布日期，提醒投資人注意
 - [ ] **選擇權資料**：整合 Put/Call Ratio、隱含波動率 (IV) 等衍生品數據
-- [ ] **支撐壓力位計算**：根據技術指標自動計算關鍵價格區間
-- [ ] **ETF 支援**：擴展支援 ETF 分析（如 SPY、QQQ）
+- [ ] **多時間框架技術分析**：日線 + 週線 + 月線綜合判斷
+- [ ] **產業輪動分析**：判斷資金流向哪些產業
+- [ ] **相關性分析**：與大盤指數（SPY）的 Beta 和相關係數
 
 ### 前端面
 - [ ] **圖表生成**：使用 matplotlib/plotly 生成 K 線圖，以圖片發送
 - [ ] **互動按鈕**：InlineKeyboard 讓使用者選擇分析深度（快速/標準/深度）
-- [ ] **自選股清單**：`/watchlist` 指令管理追蹤清單
 - [ ] **定時推送**：設定每日盤前/盤後自動推送追蹤個股報告
 - [ ] **多語言支援**：英文/簡體中文版本切換
+- [ ] **分析歷史查詢**：`/history` 查看過往分析記錄
 
 ### 後端面
-- [ ] **Webhook 模式**：將 Polling 改為 Webhook，降低資源消耗（適合 Zeabur）
-- [ ] **Redis 快取**：替換記憶體快取為 Redis，支援多實例部署
-- [ ] **資料庫**：SQLite/PostgreSQL 記錄歷史查詢與使用者偏好
-- [ ] **API Rate Limiter**：per-user 請求限制，防止濫用
-- [ ] **健康檢查端點**：HTTP `/health` 端點供 Zeabur 監控
-- [ ] **日誌持久化**：結構化 JSON 日誌，整合 Zeabur 日誌系統
-- [ ] **Graceful Shutdown**：優雅關閉，確保進行中的分析完成後才停止
-- [ ] **環境配置分離**：dev/staging/production 多環境設定檔
+- [ ] **Redis 快取**：替換記憶體快取為 Redis，支援多實例水平擴展
+- [ ] **PostgreSQL**：替換 SQLite，支援更大規模部署
+- [ ] **Docker 化**：提供 Dockerfile 與 docker-compose.yml
+- [ ] **CI/CD**：GitHub Actions 自動化測試與部署
+- [ ] **單元測試**：為每個 fetcher 和 formatter 寫測試
+- [ ] **API 重試機制**：指數退避重試失敗的 API 呼叫
 
 ---
 
