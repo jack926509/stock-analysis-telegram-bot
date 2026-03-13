@@ -6,6 +6,7 @@ OpenAI AI 分析引擎（三角色優化版）
 """
 
 import json
+import re
 
 from openai import AsyncOpenAI
 
@@ -47,6 +48,7 @@ SYSTEM_PROMPT = """你是一位縱橫華爾街 20 年的頂尖美股分析師，
 - 市值規模與產業定位（大型股 vs 成長股的不同評估框架）
 - 52 週高低點的相對位置，評估目前股價處於哪個區間
 - 籌碼結構：若有空頭比率(Short Ratio)、機構持股等數據，分析其意義
+- 同業比較：若有同業數據，比較 PE、利潤率、成長率與同業平均的差異
 
 📊 技術面分析
 - 解讀整體技術建議及多空信號比例
@@ -58,6 +60,12 @@ SYSTEM_PROMPT = """你是一位縱橫華爾街 20 年的頂尖美股分析師，
 - ADX 趨勢強度：>25 有明確趨勢，<20 盤整震盪
 - 布林通道：若有數據，判斷股價相對上下軌的位置
 - ATR 波動率：評估近期波動風險
+- 支撐壓力位：若有歷史數據，判斷關鍵支撐與壓力價位
+
+📉 歷史回測（若有數據）
+- 分析 7/30/60/90 天報酬率趨勢
+- 近期波動率是否偏高
+- 量能趨勢（近5日 vs 近20日均量）
 
 📊 量能分析
 - 分析當日成交量 vs 平均成交量，判斷量能是否放大或萎縮
@@ -111,9 +119,11 @@ def _build_context(
     yfinance_data: dict,
     tavily_data: dict,
     tradingview_data: dict,
+    history_data: dict | None = None,
+    peer_data: dict | None = None,
 ) -> str:
     """
-    將四個數據源組裝為結構化 Context 字串。
+    將所有數據源組裝為結構化 Context 字串。
     使用 JSON 格式確保數據完整性，避免格式化過程中遺失資訊。
     """
     context_parts = [
@@ -129,6 +139,21 @@ def _build_context(
         "=== 技術指標 (來源: TradingView) ===",
         json.dumps(tradingview_data, ensure_ascii=False, indent=2),
     ]
+
+    if history_data and "error" not in history_data:
+        context_parts.extend([
+            "",
+            "=== 歷史回測數據 (來源: yfinance 歷史) ===",
+            json.dumps(history_data, ensure_ascii=False, indent=2),
+        ])
+
+    if peer_data and "error" not in peer_data:
+        context_parts.extend([
+            "",
+            "=== 同業比較數據 (來源: yfinance 同業) ===",
+            json.dumps(peer_data, ensure_ascii=False, indent=2),
+        ])
+
     return "\n".join(context_parts)
 
 
@@ -138,6 +163,8 @@ async def analyze_stock(
     yfinance_data: dict,
     tavily_data: dict,
     tradingview_data: dict,
+    history_data: dict | None = None,
+    peer_data: dict | None = None,
 ) -> str:
     """
     使用 OpenAI GPT 分析股票數據。
@@ -148,6 +175,8 @@ async def analyze_stock(
         yfinance_data: yfinance 基本面
         tavily_data: Tavily 新聞
         tradingview_data: TradingView 技術指標
+        history_data: 歷史回測數據
+        peer_data: 同業比較數據
 
     Returns:
         str: AI 生成的分析文本
@@ -156,7 +185,8 @@ async def analyze_stock(
         client = _get_client()
 
         context = _build_context(
-            finnhub_data, yfinance_data, tavily_data, tradingview_data
+            finnhub_data, yfinance_data, tavily_data, tradingview_data,
+            history_data, peer_data,
         )
 
         user_prompt = f"""請根據以下 Context Data 對 {ticker.upper()} 進行全面深度分析。
@@ -205,7 +235,6 @@ def _clean_markdown_conflicts(text: str) -> str:
     text = text.replace("# ", "")
     # 移除可能破壞 Telegram Markdown 的底線（保留數字間的底線如 52_week）
     # 處理 _斜體_ 格式
-    import re
     text = re.sub(r'(?<!\w)_([^_]+)_(?!\w)', r'\1', text)
     # 移除反引號
     text = text.replace("`", "")

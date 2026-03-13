@@ -1,14 +1,14 @@
 """
-Telegram Bot 介面模組（三角色優化版 v2）
-- 後端：超時控制、並發限制、return_exceptions、結構化錯誤處理、請求快取
-- 前端：Markdown 安全發送、智能分段
-- 分析師：Tavily 搜尋加入公司全名
+Telegram Bot 介面模組（三角色優化版 v3）
+- 後端：超時控制、並發限制、return_exceptions、快取、Rate Limiting、查詢記錄
+- 前端：Markdown 安全發送、智能分段、自選股清單
+- 分析師：Tavily 搜尋加入公司全名、歷史回測、同業比較、支撐壓力位、ETF 支援
 """
 
 import asyncio
 import logging
+import re
 import time
-import traceback
 
 from telegram import Update
 from telegram.ext import (
@@ -23,22 +23,44 @@ from fetchers.finnhub_fetcher import fetch_finnhub_quote
 from fetchers.yfinance_fetcher import fetch_yfinance_fundamentals
 from fetchers.tavily_fetcher import fetch_tavily_news
 from fetchers.tradingview_fetcher import fetch_tradingview_analysis
+from fetchers.history_fetcher import fetch_history_analysis
+from fetchers.peer_fetcher import fetch_peer_comparison
 from analyzer.openai_analyzer import analyze_stock
 from utils.formatter import format_report
+from utils.rate_limiter import rate_limiter
+from utils.database import (
+    add_to_watchlist,
+    remove_from_watchlist,
+    get_watchlist,
+    record_query,
+)
 
 logger = logging.getLogger(__name__)
 
-# ── 後端優化：並發控制 ──
-# 限制同時處理的分析請求數量，避免 API rate limit
+# ── 並發控制 ──
 _analysis_semaphore = asyncio.Semaphore(3)
 
-# ── 後端優化：每個 fetcher 的超時時間（秒）──
+# ── 超時設定（秒）──
 FETCH_TIMEOUT = 30
+EXTENDED_FETCH_TIMEOUT = 45  # 含歷史 + 同業
 AI_TIMEOUT = 90
 
-# ── 後端優化：簡易請求快取（避免短時間重複查詢）──
+# ── 快取 ──
 _report_cache: dict[str, tuple[str, float]] = {}
-CACHE_TTL = 300  # 快取 5 分鐘
+
+# ── ETF 支援：允許數字的 ticker 驗證 ──
+_TICKER_PATTERN = re.compile(r'^[A-Z]{1,5}$')
+_ETF_PATTERN = re.compile(r'^[A-Z0-9]{1,5}$')
+
+
+def _validate_ticker(ticker: str) -> bool:
+    """驗證 ticker 格式。支援股票（純字母）和 ETF（字母+數字）。"""
+    return bool(_ETF_PATTERN.match(ticker))
+
+
+# ══════════════════════════════════════════
+# 指令處理器
+# ══════════════════════════════════════════
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -48,14 +70,18 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "\n"
         "我會基於真實數據為你分析美股，嚴格排除 AI 幻覺。\n"
         "\n"
-        "📌 使用方式：\n"
-        "  /report AAPL - 分析 Apple\n"
-        "  /report TSLA - 分析 Tesla\n"
-        "  /report NVDA - 分析 NVIDIA\n"
+        "📌 分析指令：\n"
+        "  /report AAPL — 分析 Apple\n"
+        "  /report TSLA — 分析 Tesla\n"
+        "  /report SPY  — 分析 ETF\n"
+        "\n"
+        "📋 自選股指令：\n"
+        "  /watchlist       — 查看自選股清單\n"
+        "  /watch AAPL      — 加入自選股\n"
+        "  /unwatch AAPL    — 移除自選股\n"
         "\n"
         "🔍 數據來源：\n"
-        "  Finnhub (即時報價) | yfinance (基本面)\n"
-        "  Tavily (新聞) | TradingView (技術指標)\n"
+        "  Finnhub | yfinance | Tavily | TradingView\n"
         "\n"
         "🤖 分析引擎：OpenAI GPT\n"
         "🛡️ 所有分析僅基於真實數據，零幻覺"
@@ -66,10 +92,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     處理 /report [TICKER] 指令。
-    核心流程：並行抓取數據 → AI 分析 → 格式化報告 → 回傳。
+    核心流程：Rate Limit → 快取 → 並行抓取數據 → AI 分析 → 格式化報告 → 回傳。
     """
-    # 驗證參數
-    if not context.args or len(context.args) == 0:
+    if not context.args:
         await update.message.reply_text(
             "❌ 請提供股票代碼，例如：/report AAPL"
         )
@@ -77,27 +102,49 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     ticker = context.args[0].upper()
 
-    # 驗證代碼格式
-    if not ticker.isalpha() or len(ticker) > 5:
+    if not _validate_ticker(ticker):
         await update.message.reply_text(
-            "❌ 無效的股票代碼。請使用英文字母代碼，例如：/report AAPL"
+            "❌ 無效的股票代碼。請使用英文代碼（1-5 字），例如：/report AAPL"
         )
         return
 
-    # ── 後端優化：快取檢查 ──
-    cache_key = ticker.upper()
+    user_id = update.effective_user.id
+
+    # ── Rate Limiting ──
+    if not rate_limiter.is_allowed(user_id):
+        wait = rate_limiter.retry_after(user_id)
+        await update.message.reply_text(
+            f"⏰ 請求過於頻繁，請 {wait} 秒後再試。\n"
+            f"（每分鐘最多 {Config.RATE_LIMIT_PER_MINUTE} 次查詢）"
+        )
+        return
+
+    # ── 記錄查詢 ──
+    try:
+        await record_query(user_id, ticker)
+    except Exception:
+        pass  # 記錄失敗不影響核心功能
+
+    # ── 健康計數 ──
+    try:
+        from utils.health import increment_request_count
+        increment_request_count()
+    except Exception:
+        pass
+
+    # ── 快取檢查 ──
+    cache_key = ticker
     cached = _report_cache.get(cache_key)
     if cached:
         report, cached_time = cached
-        if time.time() - cached_time < CACHE_TTL:
+        if time.time() - cached_time < Config.CACHE_TTL:
             age = int(time.time() - cached_time)
             await update.message.reply_text(f"⚡ 使用 {age} 秒前的快取結果")
             await _send_report(update, report)
             return
 
-    # ── 後端優化：並發控制（使用 acquire 非阻塞檢查）──
-    acquired = _analysis_semaphore._value > 0  # 檢查剩餘可用 slots
-    if not acquired:
+    # ── 並發控制 ──
+    if _analysis_semaphore._value <= 0:
         await update.message.reply_text(
             f"⏳ 系統繁忙中，目前有多筆分析正在處理。\n"
             f"請稍候片刻再重新查詢 /report {ticker}"
@@ -108,15 +155,83 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await _execute_analysis(update, ticker)
 
 
+async def watchlist_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """處理 /watchlist 指令：顯示自選股清單。"""
+    user_id = update.effective_user.id
+    tickers = await get_watchlist(user_id)
+
+    if not tickers:
+        await update.message.reply_text(
+            "📋 你的自選股清單是空的。\n\n"
+            "使用 /watch AAPL 加入股票\n"
+            "或 /report AAPL 直接分析"
+        )
+        return
+
+    lines = ["📋 *你的自選股清單*", ""]
+    for i, t in enumerate(tickers, 1):
+        lines.append(f"  {i}. {t}  ➜ /report {t}")
+    lines.append(f"\n共 {len(tickers)} 檔股票")
+    lines.append("使用 /unwatch AAPL 移除")
+
+    try:
+        await update.message.reply_text(
+            "\n".join(lines), parse_mode=ParseMode.MARKDOWN
+        )
+    except Exception:
+        await update.message.reply_text("\n".join(lines).replace("*", ""))
+
+
+async def watch_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """處理 /watch [TICKER] 指令：加入自選股。"""
+    if not context.args:
+        await update.message.reply_text("❌ 請提供股票代碼，例如：/watch AAPL")
+        return
+
+    ticker = context.args[0].upper()
+    if not _validate_ticker(ticker):
+        await update.message.reply_text("❌ 無效的股票代碼")
+        return
+
+    user_id = update.effective_user.id
+    added = await add_to_watchlist(user_id, ticker)
+
+    if added:
+        await update.message.reply_text(f"✅ 已將 {ticker} 加入自選股清單")
+    else:
+        await update.message.reply_text(f"ℹ️ {ticker} 已在自選股清單中")
+
+
+async def unwatch_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """處理 /unwatch [TICKER] 指令：移除自選股。"""
+    if not context.args:
+        await update.message.reply_text("❌ 請提供股票代碼，例如：/unwatch AAPL")
+        return
+
+    ticker = context.args[0].upper()
+    user_id = update.effective_user.id
+    removed = await remove_from_watchlist(user_id, ticker)
+
+    if removed:
+        await update.message.reply_text(f"✅ 已將 {ticker} 從自選股清單移除")
+    else:
+        await update.message.reply_text(f"ℹ️ {ticker} 不在自選股清單中")
+
+
+# ══════════════════════════════════════════
+# 核心分析流程
+# ══════════════════════════════════════════
+
+
 async def _execute_analysis(update: Update, ticker: str) -> None:
     """執行完整分析流程（被 semaphore 控制並發）。"""
 
     loading_msg = await update.message.reply_text(
-        f"⏳ 正在分析 {ticker}...\n📡 並行抓取 4 個數據源中..."
+        f"⏳ 正在分析 {ticker}...\n📡 並行抓取 6 個數據源中..."
     )
 
     try:
-        # ── Step 1: 並行抓取數據（後端優化：帶超時 + return_exceptions）──
+        # ── Step 1: 並行抓取基礎數據 ──
         logger.info(f"[{ticker}] 開始並行抓取數據...")
 
         results = await asyncio.wait_for(
@@ -124,29 +239,49 @@ async def _execute_analysis(update: Update, ticker: str) -> None:
                 fetch_finnhub_quote(ticker),
                 fetch_yfinance_fundamentals(ticker),
                 fetch_tradingview_analysis(ticker),
-                return_exceptions=True,  # 後端優化：單一失敗不影響其他
+                return_exceptions=True,
             ),
             timeout=FETCH_TIMEOUT,
         )
 
-        # 處理可能的異常結果
         finnhub_data = _ensure_dict(results[0], "Finnhub")
         yfinance_data = _ensure_dict(results[1], "yfinance")
         tradingview_data = _ensure_dict(results[2], "TradingView")
 
         logger.info(f"[{ticker}] 基礎數據抓取完成")
 
-        # Tavily 單獨處理：使用公司全名提高搜尋精確度（分析師優化）
+        # ── Step 1.5: 並行抓取擴展數據（Tavily + 歷史 + 同業）──
         company_name = yfinance_data.get("company_name", "")
+        sector = yfinance_data.get("sector", "")
+        industry = yfinance_data.get("industry", "")
+
+        extended_tasks = [fetch_tavily_news(ticker, company_name)]
+
+        if Config.HISTORY_ENABLED:
+            extended_tasks.append(fetch_history_analysis(ticker))
+
+        if Config.PEER_COMPARISON_ENABLED and sector and sector != "N/A":
+            extended_tasks.append(fetch_peer_comparison(ticker, sector, industry))
+
         try:
-            tavily_data = await asyncio.wait_for(
-                fetch_tavily_news(ticker, company_name),
-                timeout=FETCH_TIMEOUT,
+            ext_results = await asyncio.wait_for(
+                asyncio.gather(*extended_tasks, return_exceptions=True),
+                timeout=EXTENDED_FETCH_TIMEOUT,
             )
         except asyncio.TimeoutError:
-            tavily_data = {"source": "Tavily", "error": "新聞搜尋超時", "news": []}
-        except Exception as e:
-            tavily_data = {"source": "Tavily", "error": str(e), "news": []}
+            ext_results = [{"source": "extended", "error": "擴展數據超時"}] * len(extended_tasks)
+
+        # 解析擴展結果
+        tavily_data = _ensure_dict(ext_results[0], "Tavily")
+
+        history_data = {}
+        peer_data = {}
+        idx = 1
+        if Config.HISTORY_ENABLED:
+            history_data = _ensure_dict(ext_results[idx], "History") if idx < len(ext_results) else {}
+            idx += 1
+        if Config.PEER_COMPARISON_ENABLED and sector and sector != "N/A":
+            peer_data = _ensure_dict(ext_results[idx], "Peer") if idx < len(ext_results) else {}
 
         logger.info(f"[{ticker}] 所有數據抓取完成，開始 AI 分析...")
 
@@ -154,17 +289,18 @@ async def _execute_analysis(update: Update, ticker: str) -> None:
         try:
             await loading_msg.edit_text(
                 f"⏳ 正在分析 {ticker}...\n"
-                f"✅ 數據抓取完成\n"
+                f"✅ 數據抓取完成（6 源）\n"
                 f"🤖 AI 深度分析中..."
             )
         except Exception:
             pass
 
-        # ── Step 2: AI 分析（帶超時）──
+        # ── Step 2: AI 分析 ──
         try:
             ai_analysis = await asyncio.wait_for(
                 analyze_stock(
-                    ticker, finnhub_data, yfinance_data, tavily_data, tradingview_data
+                    ticker, finnhub_data, yfinance_data, tavily_data,
+                    tradingview_data, history_data, peer_data,
                 ),
                 timeout=AI_TIMEOUT,
             )
@@ -176,11 +312,11 @@ async def _execute_analysis(update: Update, ticker: str) -> None:
         # ── Step 3: 格式化報告 ──
         report = format_report(
             ticker, finnhub_data, yfinance_data, tavily_data,
-            tradingview_data, ai_analysis,
+            tradingview_data, ai_analysis, history_data, peer_data,
         )
 
         # ── Step 4: 快取並發送報告 ──
-        _report_cache[ticker.upper()] = (report, time.time())
+        _report_cache[ticker] = (report, time.time())
 
         try:
             await loading_msg.delete()
@@ -212,11 +348,13 @@ async def _execute_analysis(update: Update, ticker: str) -> None:
                 pass
 
 
+# ══════════════════════════════════════════
+# 工具函數
+# ══════════════════════════════════════════
+
+
 def _ensure_dict(result, source_name: str) -> dict:
-    """
-    確保 gather 的結果是 dict。
-    如果是 Exception（return_exceptions=True 時），轉為錯誤 dict。
-    """
+    """確保 gather 的結果是 dict。"""
     if isinstance(result, Exception):
         logger.warning(f"[{source_name}] fetcher 異常: {result}")
         return {"source": source_name, "error": f"{source_name} 錯誤: {str(result)}"}
@@ -226,10 +364,7 @@ def _ensure_dict(result, source_name: str) -> dict:
 
 
 async def _send_report(update: Update, report: str) -> None:
-    """
-    安全發送報告。先嘗試 Markdown，失敗用純文字。
-    分段時確保不會切到 Markdown 標記中間。
-    """
+    """安全發送報告。先嘗試 Markdown，失敗用純文字。"""
     chunks = _split_message(report, 4096)
 
     for chunk in chunks:
@@ -241,7 +376,6 @@ async def _send_report(update: Update, report: str) -> None:
             )
         except Exception as md_err:
             logger.warning(f"Markdown 發送失敗: {md_err}")
-            # 清理所有 Markdown 標記後用純文字發送
             clean = chunk.replace("*", "").replace("_", "").replace("`", "")
             try:
                 await update.message.reply_text(
@@ -252,10 +386,7 @@ async def _send_report(update: Update, report: str) -> None:
 
 
 def _split_message(text: str, max_length: int = 4096) -> list[str]:
-    """
-    將過長的訊息分割成多段。
-    優先在段落分隔線處切割，避免破壞格式。
-    """
+    """將過長的訊息分割成多段。"""
     if len(text) <= max_length:
         return [text]
 
@@ -265,7 +396,6 @@ def _split_message(text: str, max_length: int = 4096) -> list[str]:
             chunks.append(text)
             break
 
-        # 優先在分隔線處切割
         split_pos = text.rfind("━━━━", 0, max_length)
         if split_pos == -1:
             split_pos = text.rfind("══════", 0, max_length)
@@ -299,8 +429,15 @@ def create_bot_application() -> Application:
     """建立並設定 Telegram Bot Application。"""
     app = Application.builder().token(Config.TELEGRAM_BOT_TOKEN).build()
 
+    # 分析指令
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("report", report_command))
+
+    # 自選股指令
+    app.add_handler(CommandHandler("watchlist", watchlist_command))
+    app.add_handler(CommandHandler("watch", watch_command))
+    app.add_handler(CommandHandler("unwatch", unwatch_command))
+
     app.add_error_handler(error_handler)
 
     return app
