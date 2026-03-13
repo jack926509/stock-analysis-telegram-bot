@@ -10,6 +10,17 @@ from tavily import TavilyClient
 
 from config import Config
 
+# 後端優化：共用 client 實例
+_tavily_client: TavilyClient | None = None
+
+
+def _get_client() -> TavilyClient:
+    """取得共用的 TavilyClient。"""
+    global _tavily_client
+    if _tavily_client is None:
+        _tavily_client = TavilyClient(api_key=Config.TAVILY_API_KEY)
+    return _tavily_client
+
 
 async def fetch_tavily_news(ticker: str, company_name: str = "") -> dict:
     """
@@ -23,7 +34,7 @@ async def fetch_tavily_news(ticker: str, company_name: str = "") -> dict:
         dict: 包含 AI 摘要和新聞列表
     """
     try:
-        client = TavilyClient(api_key=Config.TAVILY_API_KEY)
+        client = _get_client()
 
         # 優化搜尋查詢：加入公司全名提高精確度
         if company_name and company_name != "N/A":

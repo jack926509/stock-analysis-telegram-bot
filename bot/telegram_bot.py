@@ -1,12 +1,13 @@
 """
-Telegram Bot 介面模組（三角色優化版）
-- 後端：超時控制、並發限制、return_exceptions、結構化錯誤處理
+Telegram Bot 介面模組（三角色優化版 v2）
+- 後端：超時控制、並發限制、return_exceptions、結構化錯誤處理、請求快取
 - 前端：Markdown 安全發送、智能分段
 - 分析師：Tavily 搜尋加入公司全名
 """
 
 import asyncio
 import logging
+import time
 import traceback
 
 from telegram import Update
@@ -34,6 +35,10 @@ _analysis_semaphore = asyncio.Semaphore(3)
 # ── 後端優化：每個 fetcher 的超時時間（秒）──
 FETCH_TIMEOUT = 30
 AI_TIMEOUT = 90
+
+# ── 後端優化：簡易請求快取（避免短時間重複查詢）──
+_report_cache: dict[str, tuple[str, float]] = {}
+CACHE_TTL = 300  # 快取 5 分鐘
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -79,8 +84,20 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return
 
-    # ── 後端優化：並發控制 ──
-    if _analysis_semaphore.locked():
+    # ── 後端優化：快取檢查 ──
+    cache_key = ticker.upper()
+    cached = _report_cache.get(cache_key)
+    if cached:
+        report, cached_time = cached
+        if time.time() - cached_time < CACHE_TTL:
+            age = int(time.time() - cached_time)
+            await update.message.reply_text(f"⚡ 使用 {age} 秒前的快取結果")
+            await _send_report(update, report)
+            return
+
+    # ── 後端優化：並發控制（使用 acquire 非阻塞檢查）──
+    acquired = _analysis_semaphore._value > 0  # 檢查剩餘可用 slots
+    if not acquired:
         await update.message.reply_text(
             f"⏳ 系統繁忙中，目前有多筆分析正在處理。\n"
             f"請稍候片刻再重新查詢 /report {ticker}"
@@ -162,7 +179,9 @@ async def _execute_analysis(update: Update, ticker: str) -> None:
             tradingview_data, ai_analysis,
         )
 
-        # ── Step 4: 發送報告 ──
+        # ── Step 4: 快取並發送報告 ──
+        _report_cache[ticker.upper()] = (report, time.time())
+
         try:
             await loading_msg.delete()
         except Exception:
