@@ -83,7 +83,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "🔍 數據來源：\n"
         "  Finnhub | yfinance | Tavily | TradingView\n"
         "\n"
-        "🤖 分析引擎：OpenAI GPT\n"
+        "🤖 分析引擎：Anthropic Claude\n"
         "🛡️ 所有分析僅基於真實數據，零幻覺"
     )
     await update.message.reply_text(welcome_msg)

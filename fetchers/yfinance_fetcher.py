@@ -61,6 +61,18 @@ def _format_percentage(value) -> str:
         return "N/A"
 
 
+def _format_earnings_date(timestamp) -> str:
+    """格式化財報發布日期。"""
+    if timestamp is None:
+        return "N/A"
+    try:
+        from datetime import datetime, timezone
+        dt = datetime.fromtimestamp(int(timestamp), tz=timezone.utc)
+        return dt.strftime("%Y-%m-%d")
+    except (ValueError, TypeError, OSError):
+        return "N/A"
+
+
 async def fetch_yfinance_fundamentals(ticker: str) -> dict:
     """
     非同步抓取 yfinance 基本面數據。
@@ -127,6 +139,26 @@ async def fetch_yfinance_fundamentals(ticker: str) -> dict:
             "held_pct_institutions": _format_percentage(info.get("heldPercentInstitutions")),
             # 營收
             "revenue": _format_large_number(info.get("totalRevenue")),
+            # 獲利能力指標（華爾街核心）
+            "roe": _format_percentage(info.get("returnOnEquity")),
+            "roa": _format_percentage(info.get("returnOnAssets")),
+            "operating_margin": _format_percentage(info.get("operatingMargins")),
+            "gross_margin": _format_percentage(info.get("grossMargins")),
+            # 現金流（巴菲特最重視的指標）
+            "free_cash_flow": _format_large_number(info.get("freeCashflow")),
+            "operating_cash_flow": _format_large_number(info.get("operatingCashflow")),
+            # 財務健康度
+            "debt_to_equity": _safe_get(info, "debtToEquity"),
+            "current_ratio": _safe_get(info, "currentRatio"),
+            "total_debt": _format_large_number(info.get("totalDebt")),
+            "total_cash": _format_large_number(info.get("totalCash")),
+            # 估值補充
+            "price_to_book": _safe_get(info, "priceToBook"),
+            "price_to_sales": _safe_get(info, "priceToSalesTrailing12Months"),
+            "enterprise_value": _format_large_number(info.get("enterpriseValue")),
+            "ev_to_ebitda": _safe_get(info, "enterpriseToEbitda"),
+            # 財報日期
+            "earnings_date": _format_earnings_date(info.get("earningsTimestamp")),
             # 公司簡介
             "business_summary": (
                 info.get("longBusinessSummary", "N/A")[:300] + "..."
