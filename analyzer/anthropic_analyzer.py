@@ -1,5 +1,5 @@
 """
-OpenAI AI 分析引擎（三角色優化版）
+Anthropic Claude AI 分析引擎（三角色優化版）
 - 分析師：加入成交量分析、成長性評估、量化評分框架
 - 前端：控制輸出格式避免破壞 Telegram Markdown
 - 後端：共用 client 實例、超時控制
@@ -8,20 +8,20 @@ OpenAI AI 分析引擎（三角色優化版）
 import json
 import re
 
-from openai import AsyncOpenAI
+import anthropic
 
 from config import Config
 
 # 共用 client 實例（後端優化：避免每次重建）
-_openai_client: AsyncOpenAI | None = None
+_anthropic_client: anthropic.AsyncAnthropic | None = None
 
 
-def _get_client() -> AsyncOpenAI:
-    """取得共用的 AsyncOpenAI client。"""
-    global _openai_client
-    if _openai_client is None:
-        _openai_client = AsyncOpenAI(api_key=Config.OPENAI_API_KEY)
-    return _openai_client
+def _get_client() -> anthropic.AsyncAnthropic:
+    """取得共用的 AsyncAnthropic client。"""
+    global _anthropic_client
+    if _anthropic_client is None:
+        _anthropic_client = anthropic.AsyncAnthropic(api_key=Config.ANTHROPIC_API_KEY)
+    return _anthropic_client
 
 
 # ──────────────────────────────────────────────
@@ -167,7 +167,7 @@ async def analyze_stock(
     peer_data: dict | None = None,
 ) -> str:
     """
-    使用 OpenAI GPT 分析股票數據。
+    使用 Anthropic Claude 分析股票數據。
 
     Args:
         ticker: 股票代碼
@@ -199,18 +199,18 @@ async def analyze_stock(
 
 請開始你的分析報告："""
 
-        response = await client.chat.completions.create(
-            model=Config.OPENAI_MODEL,
+        response = await client.messages.create(
+            model=Config.ANTHROPIC_MODEL,
+            max_tokens=3000,
+            system=SYSTEM_PROMPT,
             messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": user_prompt},
             ],
             temperature=0.3,
-            max_tokens=3000,
-            timeout=60,  # 後端優化：60 秒超時
+            timeout=60,
         )
 
-        analysis = response.choices[0].message.content
+        analysis = response.content[0].text
 
         # 前端優化：清理 AI 回傳中可能破壞 Telegram Markdown 的字元
         analysis = _clean_markdown_conflicts(analysis)
@@ -218,7 +218,7 @@ async def analyze_stock(
         return analysis
 
     except Exception as e:
-        return f"❌ AI 分析引擎錯誤: {str(e)}\n\n請檢查 OpenAI API Key 是否有效。"
+        return f"❌ AI 分析引擎錯誤: {str(e)}\n\n請檢查 Anthropic API Key 是否有效。"
 
 
 def _clean_markdown_conflicts(text: str) -> str:

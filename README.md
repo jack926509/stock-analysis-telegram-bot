@@ -6,7 +6,7 @@
 
 [![Python](https://img.shields.io/badge/Python-3.9+-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![Telegram Bot](https://img.shields.io/badge/Telegram-Bot-26A5E4?logo=telegram&logoColor=white)](https://core.telegram.org/bots)
-[![OpenAI](https://img.shields.io/badge/OpenAI-GPT--4o-412991?logo=openai&logoColor=white)](https://openai.com/)
+[![Anthropic](https://img.shields.io/badge/Anthropic-Claude-D97757?logo=anthropic&logoColor=white)](https://www.anthropic.com/)
 [![Deploy on Zeabur](https://img.shields.io/badge/Deploy-Zeabur-7B61FF?logo=zeabur&logoColor=white)](https://zeabur.com/)
 
 ---
@@ -65,7 +65,7 @@ stock_bot_project/
 │   ├── history_fetcher.py     #   歷史回測 + 支撐壓力位
 │   └── peer_fetcher.py        #   同業比較
 ├── analyzer/                  # 🤖 AI 分析層
-│   └── openai_analyzer.py     #   OpenAI GPT 分析引擎
+│   └── anthropic_analyzer.py  #   Anthropic Claude 分析引擎
 ├── bot/                       # 💬 Telegram 介面層
 │   └── telegram_bot.py        #   Bot 指令處理
 └── utils/                     # 🔧 工具模組
@@ -86,7 +86,7 @@ stock_bot_project/
 | `TELEGRAM_BOT_TOKEN` | [@BotFather](https://t.me/BotFather) 建立 Bot | 免費 |
 | `FINNHUB_API_KEY` | [finnhub.io](https://finnhub.io/) 註冊 | 免費方案 |
 | `TAVILY_API_KEY` | [tavily.com](https://tavily.com/) 註冊 | 免費方案 |
-| `OPENAI_API_KEY` | [platform.openai.com](https://platform.openai.com/) | 按量計費 |
+| `ANTHROPIC_API_KEY` | [console.anthropic.com](https://console.anthropic.com/) | 按量計費 |
 
 > 💡 yfinance 和 TradingView-TA 不需要 API Key，直接免費使用。
 
@@ -128,19 +128,52 @@ python main.py
 TELEGRAM_BOT_TOKEN=你的_Telegram_Bot_Token
 FINNHUB_API_KEY=你的_Finnhub_API_Key
 TAVILY_API_KEY=你的_Tavily_API_Key
-OPENAI_API_KEY=你的_OpenAI_API_Key
+ANTHROPIC_API_KEY=你的_Anthropic_API_Key
 ```
 
 4. 部署完成，Bot 自動啟動！（健康檢查端點自動在 8080 port 運行）
 
-### 進階部署設定
+### Zeabur 環境變數完整設定
+
+#### 必要環境變數
+
+| 變數名稱 | 說明 | 範例值 |
+|----------|------|--------|
+| `TELEGRAM_BOT_TOKEN` | Telegram Bot Token | `123456:ABC-DEF...` |
+| `FINNHUB_API_KEY` | Finnhub 即時股價 API Key | `cXXXXXXXXXXXXXX` |
+| `TAVILY_API_KEY` | Tavily 新聞搜尋 API Key | `tvly-XXXXXXXXXX` |
+| `ANTHROPIC_API_KEY` | Anthropic Claude API Key | `sk-ant-XXXXXXXXXX` |
+
+#### 選用環境變數
+
+| 變數名稱 | 說明 | 預設值 |
+|----------|------|--------|
+| `ANTHROPIC_MODEL` | Claude 模型版本 | `claude-sonnet-4-6` |
+| `BOT_MODE` | Bot 運作模式 | `polling` |
+| `WEBHOOK_URL` | Webhook 模式 URL（webhook 模式必填） | — |
+| `APP_ENV` | 應用環境 | `production` |
+| `HEALTH_ENABLED` | 啟用健康檢查端點 | `true` |
+| `HEALTH_PORT` | 健康檢查端口 | `8080` |
+| `RATE_LIMIT_PER_MINUTE` | 每用戶每分鐘請求上限 | `5` |
+| `CACHE_TTL` | 報告快取時間（秒） | `300` |
+| `DB_PATH` | SQLite 資料庫路徑 | `bot_data.db` |
+| `PEER_COMPARISON_ENABLED` | 啟用同業比較 | `true` |
+| `HISTORY_ENABLED` | 啟用歷史回測 | `true` |
+
+#### 進階部署設定（建議 Production 使用）
 
 ```
 BOT_MODE=webhook                # 使用 Webhook 模式降低資源消耗
 WEBHOOK_URL=https://your-bot.zeabur.app
 APP_ENV=production              # 啟用結構化 JSON 日誌
 HEALTH_ENABLED=true             # 啟用 /health 端點
+ANTHROPIC_MODEL=claude-sonnet-4-6  # 可選 claude-sonnet-4-6 / claude-haiku-4-5-20251001
 ```
+
+> 可用模型建議：
+> - `claude-sonnet-4-6`：推薦，兼顧分析品質與成本
+> - `claude-opus-4-6`：最高品質分析，成本較高
+> - `claude-haiku-4-5-20251001`：最快速度，適合高頻使用場景
 
 ---
 
@@ -167,7 +200,7 @@ HEALTH_ENABLED=true             # 啟用 /health 端點
 |------|------|
 | **Python 3.9+** | 主要語言 |
 | **python-telegram-bot** | Telegram Bot 框架 |
-| **OpenAI GPT-4o** | AI 分析引擎 |
+| **Anthropic Claude** | AI 分析引擎 |
 | **Finnhub** | 即時股價 API |
 | **yfinance** | 基本面 + 歷史數據 + 同業比較 |
 | **Tavily** | 新聞搜尋 API |
@@ -181,7 +214,8 @@ HEALTH_ENABLED=true             # 啟用 /health 端點
 | 決策 | 理由 |
 |------|------|
 | `asyncio.to_thread()` 包裝同步 API | 避免阻塞 event loop，實現真正並行 |
-| GPT `temperature=0.3` | 降低創造性回答，提升事實性 |
+| Claude `temperature=0.3` | 降低創造性回答，提升事實性 |
+| Claude `system` 參數獨立 | 相比放在 messages 中，system prompt 遵循度更高 |
 | 原始數據同步展示 | 反幻覺最後防線，使用者可交叉驗證 |
 | 模組化架構 | 數據源獨立，可輕鬆替換或擴展 |
 | Singleton 客戶端 | 避免重複建立 API 連線 |
@@ -196,6 +230,7 @@ HEALTH_ENABLED=true             # 啟用 /health 端點
 |------|------|------|
 | `APP_ENV` | 環境（dev/staging/production） | production |
 | `BOT_MODE` | Bot 模式（polling/webhook） | polling |
+| `ANTHROPIC_MODEL` | Claude 模型版本 | claude-sonnet-4-6 |
 | `HEALTH_PORT` | 健康檢查端口 | 8080 |
 | `RATE_LIMIT_PER_MINUTE` | 每用戶每分鐘請求上限 | 5 |
 | `CACHE_TTL` | 快取存活時間（秒） | 300 |
@@ -205,6 +240,20 @@ HEALTH_ENABLED=true             # 啟用 /health 端點
 ---
 
 ## 📝 修改歷程 (Changelog)
+
+### v4.0 — Anthropic Claude API 整合 (2026-03-23)
+
+#### 🤖 AI 引擎升級
+- **替換 OpenAI → Anthropic Claude**：改用 Anthropic Messages API，分析品質與成本效益提升
+- **System Prompt 獨立參數**：Claude 的 `system` 參數獨立於 messages，指令遵循度更高，反幻覺效果更佳
+- **模型可配置**：支援 `claude-sonnet-4-6`（預設）、`claude-opus-4-6`、`claude-haiku-4-5-20251001`
+- **200K Context Window**：Claude 支援更大的上下文窗口，可處理更豐富的股票數據
+
+#### ⚙️ 工程調整
+- 新增 `analyzer/anthropic_analyzer.py`，移除 `analyzer/openai_analyzer.py`
+- 環境變數：`OPENAI_API_KEY` → `ANTHROPIC_API_KEY`、`OPENAI_MODEL` → `ANTHROPIC_MODEL`
+- 依賴更新：`openai` → `anthropic`，移除 `tiktoken`
+- README 更新 Zeabur 環境變數完整對照表
 
 ### v3.0 — 全面功能擴展 (2026-03-13)
 
@@ -247,7 +296,7 @@ HEALTH_ENABLED=true             # 啟用 /health 端點
 
 #### ⚙️ 後端工程優化
 - 修復 Semaphore 並發控制 Bug
-- Singleton 客戶端（Finnhub、Tavily、OpenAI）
+- Singleton 客戶端（Finnhub、Tavily、Anthropic）
 - 5 分鐘 TTL 快取
 - Markdown 衝突清理強化
 

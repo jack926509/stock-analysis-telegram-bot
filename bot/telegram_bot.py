@@ -25,7 +25,7 @@ from fetchers.tavily_fetcher import fetch_tavily_news
 from fetchers.tradingview_fetcher import fetch_tradingview_analysis
 from fetchers.history_fetcher import fetch_history_analysis
 from fetchers.peer_fetcher import fetch_peer_comparison
-from analyzer.openai_analyzer import analyze_stock
+from analyzer.anthropic_analyzer import analyze_stock
 from utils.formatter import format_report
 from utils.rate_limiter import rate_limiter
 from utils.database import (
