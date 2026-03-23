@@ -17,7 +17,7 @@ idna==3.11
 jiter==0.13.0
 multitasking==0.0.12
 numpy==2.0.2
-anthropic==0.52.0
+anthropic>=0.52.0
 pandas==2.3.3
 peewee==4.0.1
 platformdirs==4.4.0
