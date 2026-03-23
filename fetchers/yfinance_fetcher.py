@@ -61,14 +61,24 @@ def _format_percentage(value) -> str:
         return "N/A"
 
 
-def _format_earnings_date(timestamp) -> str:
-    """格式化財報發布日期。"""
-    if timestamp is None:
-        return "N/A"
+def _format_earnings_date(info: dict) -> str:
+    """從 yfinance info 中取得下次財報日期。"""
     try:
         from datetime import datetime, timezone
-        dt = datetime.fromtimestamp(int(timestamp), tz=timezone.utc)
-        return dt.strftime("%Y-%m-%d")
+        # yfinance 可能使用不同欄位名稱
+        for key in ("earningsTimestamp", "earningsDate", "nextEarningsDate"):
+            val = info.get(key)
+            if val is None:
+                continue
+            # earningsDate 可能是 list of timestamps
+            if isinstance(val, (list, tuple)) and len(val) > 0:
+                val = val[0]
+            if isinstance(val, (int, float)):
+                dt = datetime.fromtimestamp(int(val), tz=timezone.utc)
+                return dt.strftime("%Y-%m-%d")
+            if isinstance(val, str) and val:
+                return val
+        return "N/A"
     except (ValueError, TypeError, OSError):
         return "N/A"
 
@@ -158,7 +168,7 @@ async def fetch_yfinance_fundamentals(ticker: str) -> dict:
             "enterprise_value": _format_large_number(info.get("enterpriseValue")),
             "ev_to_ebitda": _safe_get(info, "enterpriseToEbitda"),
             # 財報日期
-            "earnings_date": _format_earnings_date(info.get("earningsTimestamp")),
+            "earnings_date": _format_earnings_date(info),
             # 公司簡介
             "business_summary": (
                 info.get("longBusinessSummary", "N/A")[:300] + "..."

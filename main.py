@@ -106,7 +106,7 @@ def main():
 
     # 啟動 Bot
     logger.info("🚀 正在啟動零幻覺美股分析 Bot...")
-    logger.info(f"📦 AI 模型: {Config.OPENAI_MODEL}")
+    logger.info(f"📦 AI 模型: {Config.ANTHROPIC_MODEL}")
     logger.info(f"🌍 環境: {Config.ENV}")
     logger.info(f"📡 模式: {Config.BOT_MODE}")
 
