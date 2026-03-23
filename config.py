@@ -28,9 +28,9 @@ class Config:
     # ── Tavily ──
     TAVILY_API_KEY: str = os.getenv("TAVILY_API_KEY", "")
 
-    # ── OpenAI ──
-    OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
-    OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-4o")
+    # ── Anthropic ──
+    ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
+    ANTHROPIC_MODEL: str = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6")
 
     # ── 健康檢查 ──
     HEALTH_PORT: int = int(os.getenv("HEALTH_PORT", "8080"))
@@ -61,8 +61,8 @@ class Config:
             missing.append("FINNHUB_API_KEY")
         if not cls.TAVILY_API_KEY:
             missing.append("TAVILY_API_KEY")
-        if not cls.OPENAI_API_KEY:
-            missing.append("OPENAI_API_KEY")
+        if not cls.ANTHROPIC_API_KEY:
+            missing.append("ANTHROPIC_API_KEY")
 
         if cls.BOT_MODE == "webhook" and not cls.WEBHOOK_URL:
             missing.append("WEBHOOK_URL (webhook 模式必需)")
