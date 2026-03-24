@@ -51,6 +51,9 @@ class Config:
     # ── 歷史回測 ──
     HISTORY_ENABLED: bool = os.getenv("HISTORY_ENABLED", "true").lower() == "true"
 
+    # ── Newsletter 日報 ──
+    NEWSLETTER_ENABLED: bool = os.getenv("NEWSLETTER_ENABLED", "true").lower() == "true"
+
     @classmethod
     def validate(cls) -> None:
         """驗證所有必要的環境變數是否已設定。"""
