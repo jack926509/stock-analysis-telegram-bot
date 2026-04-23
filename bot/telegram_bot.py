@@ -8,11 +8,11 @@ Telegram Bot 介面模組（三角色優化版 v3）
 import asyncio
 import logging
 import re
-import time
 
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
 )
@@ -27,6 +27,8 @@ from fetchers.history_fetcher import fetch_history_analysis
 from fetchers.peer_fetcher import fetch_peer_comparison
 from analyzer.anthropic_analyzer import analyze_stock
 from utils.formatter import format_report
+from utils.cache import raw_cache, report_cache
+from utils.chart import generate_chart
 from utils.rate_limiter import rate_limiter
 from utils.database import (
     add_to_watchlist,
@@ -44,9 +46,6 @@ _analysis_semaphore = asyncio.Semaphore(3)
 FETCH_TIMEOUT = 30
 EXTENDED_FETCH_TIMEOUT = 45  # 含歷史 + 同業
 AI_TIMEOUT = 90
-
-# ── 快取 ──
-_report_cache: dict[str, tuple[str, float]] = {}
 
 # ── ETF 支援：允許數字的 ticker 驗證 ──
 _TICKER_PATTERN = re.compile(r'^[A-Z]{1,5}$')
@@ -132,16 +131,14 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     except Exception:
         pass
 
-    # ── 快取檢查 ──
-    cache_key = ticker
-    cached = _report_cache.get(cache_key)
-    if cached:
-        report, cached_time = cached
-        if time.time() - cached_time < Config.CACHE_TTL:
-            age = int(time.time() - cached_time)
-            await update.message.reply_text(f"⚡ 使用 {age} 秒前的快取結果")
-            await _send_report(update, report)
-            return
+    # ── 報告快取檢查 ──
+    cached_report = report_cache.get(ticker)
+    if cached_report:
+        age = report_cache.get_age(ticker) or 0
+        await update.message.reply_text(f"⚡ 使用 {age} 秒前的快取結果")
+        keyboard = _build_report_keyboard(ticker)
+        await _send_report(update, cached_report, reply_markup=keyboard)
+        return
 
     # ── 並發控制 ──
     if _analysis_semaphore._value <= 0:
@@ -231,24 +228,27 @@ async def _execute_analysis(update: Update, ticker: str) -> None:
     )
 
     try:
-        # ── Step 1: 並行抓取基礎數據 ──
-        logger.info(f"[{ticker}] 開始並行抓取數據...")
-
-        results = await asyncio.wait_for(
-            asyncio.gather(
-                fetch_finnhub_quote(ticker),
-                fetch_yfinance_fundamentals(ticker),
-                fetch_tradingview_analysis(ticker),
-                return_exceptions=True,
-            ),
-            timeout=FETCH_TIMEOUT,
-        )
-
-        finnhub_data = _ensure_dict(results[0], "Finnhub")
-        yfinance_data = _ensure_dict(results[1], "yfinance")
-        tradingview_data = _ensure_dict(results[2], "TradingView")
-
-        logger.info(f"[{ticker}] 基礎數據抓取完成")
+        # ── Step 1: 並行抓取基礎數據（帶 raw 快取）──
+        cached_raw = raw_cache.get(f"{ticker}:base")
+        if cached_raw:
+            finnhub_data, yfinance_data, tradingview_data = cached_raw
+            logger.info(f"[{ticker}] 使用 raw cache 基礎數據")
+        else:
+            logger.info(f"[{ticker}] 開始並行抓取數據...")
+            results = await asyncio.wait_for(
+                asyncio.gather(
+                    fetch_finnhub_quote(ticker),
+                    fetch_yfinance_fundamentals(ticker),
+                    fetch_tradingview_analysis(ticker),
+                    return_exceptions=True,
+                ),
+                timeout=FETCH_TIMEOUT,
+            )
+            finnhub_data = _ensure_dict(results[0], "Finnhub")
+            yfinance_data = _ensure_dict(results[1], "yfinance")
+            tradingview_data = _ensure_dict(results[2], "TradingView")
+            raw_cache.set(f"{ticker}:base", (finnhub_data, yfinance_data, tradingview_data))
+            logger.info(f"[{ticker}] 基礎數據抓取完成")
 
         # ── Step 1.5: 並行抓取擴展數據（Tavily + 歷史 + 同業）──
         company_name = yfinance_data.get("company_name", "")
@@ -263,13 +263,19 @@ async def _execute_analysis(update: Update, ticker: str) -> None:
         if Config.PEER_COMPARISON_ENABLED and sector and sector != "N/A":
             extended_tasks.append(fetch_peer_comparison(ticker, sector, industry))
 
+        chart_task = generate_chart(ticker)
+
         try:
-            ext_results = await asyncio.wait_for(
-                asyncio.gather(*extended_tasks, return_exceptions=True),
+            ext_results, chart_buf = await asyncio.wait_for(
+                asyncio.gather(
+                    asyncio.gather(*extended_tasks, return_exceptions=True),
+                    chart_task,
+                ),
                 timeout=EXTENDED_FETCH_TIMEOUT,
             )
         except asyncio.TimeoutError:
             ext_results = [{"source": "extended", "error": "擴展數據超時"}] * len(extended_tasks)
+            chart_buf = None
 
         # 解析擴展結果
         tavily_data = _ensure_dict(ext_results[0], "Tavily")
@@ -316,14 +322,24 @@ async def _execute_analysis(update: Update, ticker: str) -> None:
         )
 
         # ── Step 4: 快取並發送報告 ──
-        _report_cache[ticker] = (report, time.time())
+        report_cache.set(ticker, report)
 
         try:
             await loading_msg.delete()
         except Exception:
             pass
 
-        await _send_report(update, report)
+        if chart_buf:
+            try:
+                await update.message.reply_photo(
+                    photo=chart_buf,
+                    caption=f"📈 {ticker.upper()} — 60 日 K 線圖（MA5/MA20/MA60）",
+                )
+            except Exception as chart_err:
+                logger.warning(f"[{ticker}] K 線圖發送失敗: {chart_err}")
+
+        keyboard = _build_report_keyboard(ticker)
+        await _send_report(update, report, reply_markup=keyboard)
         logger.info(f"[{ticker}] 報告已發送")
 
     except asyncio.TimeoutError:
@@ -353,6 +369,16 @@ async def _execute_analysis(update: Update, ticker: str) -> None:
 # ══════════════════════════════════════════
 
 
+def _build_report_keyboard(ticker: str) -> InlineKeyboardMarkup:
+    """建立報告下方的互動按鈕。"""
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("⭐ 加入自選股", callback_data=f"watch:{ticker}"),
+            InlineKeyboardButton("🔄 重新分析", callback_data=f"refresh:{ticker}"),
+        ],
+    ])
+
+
 def _ensure_dict(result, source_name: str) -> dict:
     """確保 gather 的結果是 dict。"""
     if isinstance(result, Exception):
@@ -363,23 +389,29 @@ def _ensure_dict(result, source_name: str) -> dict:
     return {"source": source_name, "error": f"{source_name} 回傳格式異常"}
 
 
-async def _send_report(update: Update, report: str) -> None:
-    """安全發送報告。先嘗試 Markdown，失敗用純文字。"""
+async def _send_report(update: Update, report: str,
+                       reply_markup=None) -> None:
+    """安全發送報告。先嘗試 Markdown，失敗用純文字。最後一段附帶 reply_markup。"""
     chunks = _split_message(report, 4096)
 
-    for chunk in chunks:
+    for i, chunk in enumerate(chunks):
+        is_last = (i == len(chunks) - 1)
+        markup = reply_markup if is_last else None
         try:
             await update.message.reply_text(
                 chunk,
                 parse_mode=ParseMode.MARKDOWN,
                 disable_web_page_preview=True,
+                reply_markup=markup,
             )
         except Exception as md_err:
             logger.warning(f"Markdown 發送失敗: {md_err}")
             clean = chunk.replace("*", "").replace("_", "").replace("`", "")
             try:
                 await update.message.reply_text(
-                    clean, disable_web_page_preview=True
+                    clean,
+                    disable_web_page_preview=True,
+                    reply_markup=markup,
                 )
             except Exception as txt_err:
                 logger.error(f"純文字發送也失敗: {txt_err}")
@@ -412,6 +444,49 @@ def _split_message(text: str, max_length: int = 4096) -> list[str]:
     return chunks
 
 
+async def _inline_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """處理 InlineKeyboard 按鈕回調。"""
+    query = update.callback_query
+    await query.answer()
+
+    data = query.data or ""
+    user_id = query.from_user.id
+
+    if data.startswith("watch:"):
+        ticker = data.split(":", 1)[1]
+        added = await add_to_watchlist(user_id, ticker)
+        if added:
+            await query.edit_message_reply_markup(reply_markup=None)
+            await query.message.reply_text(f"⭐ 已將 {ticker} 加入自選股清單")
+        else:
+            await query.answer(f"{ticker} 已在自選股清單中", show_alert=True)
+
+    elif data.startswith("refresh:"):
+        ticker = data.split(":", 1)[1]
+        if not rate_limiter.is_allowed(user_id):
+            wait = rate_limiter.retry_after(user_id)
+            await query.answer(f"請 {wait} 秒後再試", show_alert=True)
+            return
+        try:
+            await record_query(user_id, ticker)
+        except Exception:
+            pass
+        await query.edit_message_reply_markup(reply_markup=None)
+        msg = await query.message.reply_text(f"🔄 正在重新分析 {ticker}...")
+        try:
+            await msg.delete()
+        except Exception:
+            pass
+        # 模擬一個 update.message 來複用分析流程
+        context.args = [ticker]
+        fake_update = Update(
+            update_id=update.update_id,
+            message=query.message,
+        )
+        async with _analysis_semaphore:
+            await _execute_analysis(fake_update, ticker)
+
+
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     """全局錯誤處理器。"""
     logger.error(f"未處理的異常: {context.error}", exc_info=context.error)
@@ -437,6 +512,9 @@ def create_bot_application() -> Application:
     app.add_handler(CommandHandler("watchlist", watchlist_command))
     app.add_handler(CommandHandler("watch", watch_command))
     app.add_handler(CommandHandler("unwatch", unwatch_command))
+
+    # InlineKeyboard 回調
+    app.add_handler(CallbackQueryHandler(_inline_button_handler))
 
     app.add_error_handler(error_handler)
 

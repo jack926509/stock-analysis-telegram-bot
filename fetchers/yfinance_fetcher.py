@@ -8,6 +8,8 @@ import asyncio
 
 import yfinance as yf
 
+from utils.retry import retry_async_call
+
 
 def _safe_get(info: dict, key: str, fallback="N/A"):
     """安全取值，None 或缺失一律回傳 fallback。"""
@@ -65,12 +67,10 @@ def _format_earnings_date(info: dict) -> str:
     """從 yfinance info 中取得下次財報日期。"""
     try:
         from datetime import datetime, timezone
-        # yfinance 可能使用不同欄位名稱
         for key in ("earningsTimestamp", "earningsDate", "nextEarningsDate"):
             val = info.get(key)
             if val is None:
                 continue
-            # earningsDate 可能是 list of timestamps
             if isinstance(val, (list, tuple)) and len(val) > 0:
                 val = val[0]
             if isinstance(val, (int, float)):
@@ -95,7 +95,10 @@ async def fetch_yfinance_fundamentals(ticker: str) -> dict:
     """
     try:
         stock = yf.Ticker(ticker.upper())
-        info = await asyncio.to_thread(lambda: stock.info)
+        info = await retry_async_call(
+            asyncio.to_thread, lambda: stock.info,
+            source_name="yfinance",
+        )
 
         if not info or info.get("regularMarketPrice") is None:
             # 嘗試檢查是否有任何有效數據

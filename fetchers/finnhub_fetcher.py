@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 import finnhub
 
 from config import Config
+from utils.retry import retry_async_call
 
 # 後端優化：共用 client 實例，避免每次請求重建
 _finnhub_client: finnhub.Client | None = None
@@ -34,7 +35,10 @@ async def fetch_finnhub_quote(ticker: str) -> dict:
     """
     try:
         client = _get_client()
-        quote = await asyncio.to_thread(client.quote, ticker.upper())
+        quote = await retry_async_call(
+            asyncio.to_thread, client.quote, ticker.upper(),
+            source_name="Finnhub",
+        )
 
         if not quote or quote.get("c", 0) == 0:
             return {

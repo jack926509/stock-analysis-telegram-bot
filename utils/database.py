@@ -112,11 +112,12 @@ async def get_user_query_count(user_id: int, window_seconds: int = 60) -> int:
         def _op():
             conn = _get_connection()
             try:
-                cutoff = datetime.now(timezone.utc).isoformat()
+                cutoff = datetime.now(timezone.utc)
+                from datetime import timedelta
+                cutoff_str = (cutoff - timedelta(seconds=window_seconds)).isoformat()
                 cursor = conn.execute(
-                    """SELECT COUNT(*) FROM query_history
-                       WHERE user_id = ? AND queried_at > datetime(?, ?)""",
-                    (user_id, cutoff, f"-{window_seconds} seconds"),
+                    "SELECT COUNT(*) FROM query_history WHERE user_id = ? AND queried_at > ?",
+                    (user_id, cutoff_str),
                 )
                 return cursor.fetchone()[0]
             finally:

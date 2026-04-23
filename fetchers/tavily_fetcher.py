@@ -9,6 +9,7 @@ import asyncio
 from tavily import TavilyClient
 
 from config import Config
+from utils.retry import retry_async_call
 
 # 後端優化：共用 client 實例
 _tavily_client: TavilyClient | None = None
@@ -48,14 +49,17 @@ async def fetch_tavily_news(ticker: str, company_name: str = "") -> dict:
                 f"upgrade downgrade catalyst news"
             )
 
-        response = await asyncio.to_thread(
-            client.search,
-            query=query,
-            search_depth="advanced",
-            include_answer=True,
-            max_results=5,
-            topic="news",
-            days=7,
+        response = await retry_async_call(
+            asyncio.to_thread,
+            lambda: client.search(
+                query=query,
+                search_depth="advanced",
+                include_answer=True,
+                max_results=5,
+                topic="news",
+                days=7,
+            ),
+            source_name="Tavily",
         )
 
         # 解析新聞結果

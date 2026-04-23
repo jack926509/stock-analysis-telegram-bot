@@ -7,6 +7,8 @@ import asyncio
 
 import yfinance as yf
 
+from utils.retry import retry_async_call
+
 
 # 各產業代表性公司對照（用於找不到 peer 時的 fallback）
 SECTOR_LEADERS = {
@@ -99,7 +101,10 @@ async def _fetch_peer_metrics(ticker: str) -> dict:
     """抓取單一公司的關鍵比較指標。"""
     try:
         stock = yf.Ticker(ticker)
-        info = await asyncio.to_thread(lambda: stock.info)
+        info = await retry_async_call(
+            asyncio.to_thread, lambda: stock.info,
+            source_name=f"Peer-{ticker}",
+        )
 
         if not info:
             return {"ticker": ticker, "error": "無數據"}

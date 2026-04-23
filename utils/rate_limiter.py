@@ -9,16 +9,17 @@ from collections import defaultdict
 
 logger = logging.getLogger(__name__)
 
-# 設定：每位使用者每分鐘最多 N 次請求
-MAX_REQUESTS_PER_MINUTE = 5
 WINDOW_SECONDS = 60
 
 
 class RateLimiter:
     """滑動窗口 rate limiter。"""
 
-    def __init__(self, max_requests: int = MAX_REQUESTS_PER_MINUTE,
+    def __init__(self, max_requests: int | None = None,
                  window: int = WINDOW_SECONDS):
+        if max_requests is None:
+            from config import Config
+            max_requests = Config.RATE_LIMIT_PER_MINUTE
         self._max_requests = max_requests
         self._window = window
         self._requests: dict[int, list[float]] = defaultdict(list)

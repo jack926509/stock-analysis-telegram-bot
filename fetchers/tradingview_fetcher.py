@@ -7,6 +7,8 @@ import asyncio
 
 from tradingview_ta import TA_Handler, Interval
 
+from utils.retry import retry_async_call
+
 
 # 常見美股交易所對照
 EXCHANGES = ["NASDAQ", "NYSE", "AMEX"]
@@ -149,7 +151,10 @@ async def fetch_tradingview_analysis(ticker: str) -> dict:
         return None
 
     try:
-        result = await asyncio.to_thread(_fetch)
+        result = await retry_async_call(
+            asyncio.to_thread, _fetch,
+            source_name="TradingView",
+        )
         if result:
             return result
         return {
