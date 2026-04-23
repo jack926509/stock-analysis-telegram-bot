@@ -76,6 +76,42 @@ def _validate_ticker(ticker: str) -> bool:
     return bool(_TICKER_PATTERN.match(ticker))
 
 
+def _pos_52w(price, year_high, year_low) -> float | None:
+    """股價在 52 週區間的相對位置 0–100（貼近 52w 低為 0、貼近 52w 高為 100）。"""
+    try:
+        if price is None or year_high is None or year_low is None:
+            return None
+        p, h, l = float(price), float(year_high), float(year_low)
+        if h <= l:
+            return None
+        return max(0.0, min(100.0, (p - l) / (h - l) * 100))
+    except (ValueError, TypeError):
+        return None
+
+
+def _vol_ratio(volume, avg_volume) -> float | None:
+    """成交量 / 平均量，用於判斷量能異常。"""
+    try:
+        if not volume or not avg_volume:
+            return None
+        return float(volume) / float(avg_volume)
+    except (ValueError, TypeError, ZeroDivisionError):
+        return None
+
+
+def _fmt_mcap(mcap) -> str:
+    """市值格式化（1.2T / 320B / 500M）。"""
+    if not isinstance(mcap, (int, float)):
+        return ""
+    if mcap >= 1e12:
+        return f"{mcap / 1e12:.1f}T"
+    if mcap >= 1e9:
+        return f"{mcap / 1e9:.0f}B"
+    if mcap >= 1e6:
+        return f"{mcap / 1e6:.0f}M"
+    return f"{mcap:,.0f}"
+
+
 # ══════════════════════════════════════════
 # 指令處理器
 # ══════════════════════════════════════════
@@ -206,7 +242,7 @@ async def _dispatch_analysis(chat_id: int, user_id: int, ticker: str, bot) -> No
 
 
 async def watchlist_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """處理 /watchlist 指令：顯示自選股清單 + 即時報價。"""
+    """處理 /watchlist 指令：顯示自選股清單 + 即時報價（含總覽列、排序、52w 位置、量能）。"""
     user_id = update.effective_user.id
     tickers = await get_watchlist(user_id)
 
@@ -222,23 +258,74 @@ async def watchlist_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     prices = await fetch_fmp_batch_prices(tickers)
 
-    lines = ["📋 <b>自選股清單</b>  ─  即時報價", ""]
-    for i, t in enumerate(tickers, 1):
-        quote = prices.get(t, {})
-        if quote and quote.get("price") is not None:
-            price = quote["price"]
-            chg = quote.get("change", 0) or 0
-            chg_pct = quote.get("change_pct", 0) or 0
-            arrow = "🟢" if chg >= 0 else "🔴"
-            sign = "+" if chg >= 0 else ""
-            lines.append(
-                f"  {i}. <b>{_esc(t)}</b>  ${price:.2f}  "
-                f"{arrow}{sign}{chg:.2f} ({sign}{chg_pct:.2f}%)"
-            )
+    # ── 整理資料 ──
+    valid, invalid = [], []
+    for t in tickers:
+        q = prices.get(t, {})
+        if q.get("price") is not None:
+            valid.append({
+                "ticker": t,
+                "price": q["price"],
+                "chg": q.get("change") or 0,
+                "chg_pct": q.get("change_pct") or 0,
+                "pos52": _pos_52w(q.get("price"), q.get("year_high"), q.get("year_low")),
+                "vol_ratio": _vol_ratio(q.get("volume"), q.get("avg_volume")),
+            })
         else:
-            lines.append(f"  {i}. <b>{_esc(t)}</b>  報價載入中...")
+            invalid.append(t)
 
-    lines.append(f"\n共 {len(tickers)} 檔  |  /scan 批次快掃")
+    # 依當日漲跌 % 由高到低排序（強勢在上）
+    valid.sort(key=lambda r: r["chg_pct"], reverse=True)
+
+    # ── 總覽列 ──
+    ups = sum(1 for r in valid if r["chg_pct"] > 0)
+    downs = sum(1 for r in valid if r["chg_pct"] < 0)
+    flats = len(valid) - ups - downs
+    avg_pct = sum(r["chg_pct"] for r in valid) / len(valid) if valid else 0
+
+    summary = f"📋 <b>自選股</b> ({len(tickers)} 檔)  🟢{ups} 漲 / 🔴{downs} 跌"
+    if flats:
+        summary += f" / ⚪{flats} 平"
+    summary += f"  平均 {'+' if avg_pct >= 0 else ''}{avg_pct:.2f}%"
+    lines = [summary]
+
+    if valid:
+        top, bot = valid[0], valid[-1]
+        highlights = []
+        if top["chg_pct"] > 0:
+            highlights.append(f"👑 最強 <b>{_esc(top['ticker'])}</b> +{top['chg_pct']:.2f}%")
+        if bot["chg_pct"] < 0:
+            highlights.append(f"⚠️ 最弱 <b>{_esc(bot['ticker'])}</b> {bot['chg_pct']:.2f}%")
+        if highlights:
+            lines.append("  ".join(highlights))
+    lines.append("")
+
+    # ── 各檔明細 ──
+    for r in valid:
+        arrow = "🟢" if r["chg_pct"] >= 0 else "🔴"
+        sign = "+" if r["chg_pct"] >= 0 else ""
+        tags = []
+        if r["pos52"] is not None:
+            if r["pos52"] >= 95:
+                tags.append(f"📍52w {r['pos52']:.0f}% 🔝")
+            elif r["pos52"] <= 5:
+                tags.append(f"📍52w {r['pos52']:.0f}% 🔻")
+            else:
+                tags.append(f"📍52w {r['pos52']:.0f}%")
+        if r["vol_ratio"] and r["vol_ratio"] >= 1.5:
+            tags.append(f"🔥{r['vol_ratio']:.1f}x量")
+        tag_str = f"  {'  '.join(tags)}" if tags else ""
+        lines.append(
+            f"{arrow} <b>{_esc(r['ticker'])}</b>  ${r['price']:.2f}  "
+            f"{sign}{r['chg_pct']:.2f}%{tag_str}"
+        )
+
+    if invalid:
+        lines.append("")
+        for t in invalid:
+            lines.append(f"⚪ <b>{_esc(t)}</b>  報價載入失敗")
+
+    lines.append(f"\n/scan 批次快掃 (含 RSI / 技術評級)")
 
     keyboard = InlineKeyboardMarkup([
         [
@@ -327,62 +414,141 @@ async def _run_scan(chat_id: int, user_id: int, bot) -> None:
     except asyncio.TimeoutError:
         ta_results = [{}] * len(tickers)
 
-    lines = ["📊 <b>自選股批次快掃</b>", ""]
+    rec_map = {
+        "STRONG_BUY": "強買", "BUY": "買入",
+        "NEUTRAL": "中性", "SELL": "賣出", "STRONG_SELL": "強賣",
+    }
 
+    # ── 整理每檔資料 ──
+    rows = []
     for i, t in enumerate(tickers):
-        quote = prices.get(t, {})
+        q = prices.get(t, {})
         ta = _ensure_dict(ta_results[i], "TA") if i < len(ta_results) else {}
-
-        price_str = f"${quote['price']:.2f}" if quote.get("price") else "N/A"
-        chg = quote.get("change", 0) or 0
-        chg_pct = quote.get("change_pct", 0) or 0
-        arrow = "🟢" if chg >= 0 else "🔴"
-        sign = "+" if chg >= 0 else ""
-
         summary_val = ta.get("summary", {})
         rec = summary_val.get("RECOMMENDATION", "N/A") if isinstance(summary_val, dict) else "N/A"
         if rec == "N/A":
             rec = ta.get("recommendation", "N/A")
+        rsi = ta.get("rsi_14", ta.get("rsi"))
+        rsi = rsi if isinstance(rsi, (int, float)) else None
+        rows.append({
+            "ticker": t,
+            "price": q.get("price"),
+            "chg_pct": (q.get("change_pct") or 0) if q.get("price") is not None else None,
+            "market_cap": q.get("market_cap"),
+            "rec": rec,
+            "rec_zh": rec_map.get(rec, rec),
+            "rsi": rsi,
+            "pos52": _pos_52w(q.get("price"), q.get("year_high"), q.get("year_low")),
+            "vol_ratio": _vol_ratio(q.get("volume"), q.get("avg_volume")),
+        })
 
-        rsi_val = ta.get("rsi_14", ta.get("rsi", "N/A"))
-        if isinstance(rsi_val, (int, float)):
-            if rsi_val > 70:
-                rsi_tag = "超買"
-            elif rsi_val < 30:
-                rsi_tag = "超賣"
-            else:
-                rsi_tag = f"{rsi_val:.0f}"
-        else:
-            rsi_tag = "N/A"
+    valid = [r for r in rows if r["price"] is not None]
+    invalid = [r for r in rows if r["price"] is None]
 
-        rec_map = {
-            "STRONG_BUY": "強買", "BUY": "買入",
-            "NEUTRAL": "中性", "SELL": "賣出", "STRONG_SELL": "強賣",
-        }
-        rec_zh = rec_map.get(rec, rec)
+    # ── 警示判定 ──
+    def _alerts(r) -> list[str]:
+        out = []
+        if r["rsi"] is not None:
+            if r["rsi"] > 70:
+                out.append(f"RSI {r['rsi']:.0f} 超買")
+            elif r["rsi"] < 30:
+                out.append(f"RSI {r['rsi']:.0f} 超賣")
+        if r["rec"] == "STRONG_BUY":
+            out.append("TV 強買")
+        elif r["rec"] == "STRONG_SELL":
+            out.append("TV 強賣")
+        if r["pos52"] is not None:
+            if r["pos52"] >= 95:
+                out.append(f"近 52w 高 ({r['pos52']:.0f}%)")
+            elif r["pos52"] <= 5:
+                out.append(f"近 52w 低 ({r['pos52']:.0f}%)")
+        if r["vol_ratio"] and r["vol_ratio"] >= 2.0:
+            out.append(f"量爆 {r['vol_ratio']:.1f}x")
+        return out
 
-        mcap = quote.get("market_cap")
-        cap_str = ""
-        if mcap and isinstance(mcap, (int, float)):
-            if mcap >= 1e12:
-                cap_str = f"{mcap / 1e12:.1f}T"
-            elif mcap >= 1e9:
-                cap_str = f"{mcap / 1e9:.0f}B"
-            else:
-                cap_str = f"{mcap / 1e6:.0f}M"
+    alerted_ids = set()
+    alerted_rows = []
+    for r in valid:
+        a = _alerts(r)
+        if a:
+            alerted_rows.append((r, a))
+            alerted_ids.add(r["ticker"])
 
-        lines.append(f"<b>{_esc(t)}</b> {price_str} {arrow}{sign}{chg_pct:.1f}%")
-        detail_parts = []
-        if cap_str:
-            detail_parts.append(cap_str)
-        detail_parts.append(f"TV:{_esc(rec_zh)}")
-        detail_parts.append(f"RSI:{_esc(rsi_tag)}")
-        lines.append(f"  {' | '.join(detail_parts)}  ➜ /report {_esc(t)}")
+    ups = sorted((r for r in valid if r["chg_pct"] > 0), key=lambda r: r["chg_pct"], reverse=True)
+    downs = sorted((r for r in valid if r["chg_pct"] < 0), key=lambda r: r["chg_pct"])
+    flats = [r for r in valid if r["chg_pct"] == 0]
+
+    # ── 總覽列 ──
+    avg_pct = sum(r["chg_pct"] for r in valid) / len(valid) if valid else 0
+    header = (
+        f"📊 <b>自選股批次快掃</b> ({len(valid)}/{len(tickers)})  "
+        f"🟢{len(ups)} 漲 / 🔴{len(downs)} 跌"
+    )
+    if flats:
+        header += f" / ⚪{len(flats)} 平"
+    header += f"  平均 {'+' if avg_pct >= 0 else ''}{avg_pct:.2f}%"
+    lines = [header]
+
+    def _row_line(r) -> str:
+        arrow = "🟢" if r["chg_pct"] >= 0 else "🔴"
+        sign = "+" if r["chg_pct"] >= 0 else ""
+        bits = []
+        if r["pos52"] is not None:
+            bits.append(f"52w:{r['pos52']:.0f}%")
+        if r["rsi"] is not None:
+            bits.append(f"RSI:{r['rsi']:.0f}")
+        if r["rec_zh"] and r["rec_zh"] != "N/A":
+            bits.append(f"TV:{_esc(r['rec_zh'])}")
+        cap = _fmt_mcap(r["market_cap"])
+        if cap:
+            bits.append(cap)
+        if r["vol_ratio"] and r["vol_ratio"] >= 1.5:
+            bits.append(f"🔥{r['vol_ratio']:.1f}x")
+        head = f"{arrow} <b>{_esc(r['ticker'])}</b> ${r['price']:.2f} {sign}{r['chg_pct']:.2f}%"
+        return head + ("\n  " + " | ".join(bits) if bits else "") + f"  ➜ /report {_esc(r['ticker'])}"
+
+    # ── 警示區 ──
+    if alerted_rows:
         lines.append("")
+        lines.append("🚨 <b>警示</b>")
+        alerted_rows.sort(key=lambda x: abs(x[0]["chg_pct"]), reverse=True)
+        for r, alerts in alerted_rows:
+            lines.append(_row_line(r))
+            lines.append(f"  ⚠️ {' · '.join(alerts)}")
 
-    footer = f"共 {len(tickers)} 檔  |  點選 /report 查看完整分析"
+    # ── 上漲（排除已在警示區）──
+    remaining_ups = [r for r in ups if r["ticker"] not in alerted_ids]
+    if remaining_ups:
+        lines.append("")
+        lines.append(f"🟢 <b>上漲 ({len(remaining_ups)})</b>")
+        for r in remaining_ups:
+            lines.append(_row_line(r))
+
+    # ── 下跌（排除已在警示區）──
+    remaining_downs = [r for r in downs if r["ticker"] not in alerted_ids]
+    if remaining_downs:
+        lines.append("")
+        lines.append(f"🔴 <b>下跌 ({len(remaining_downs)})</b>")
+        for r in remaining_downs:
+            lines.append(_row_line(r))
+
+    # ── 平盤（若有且未在警示區）──
+    remaining_flats = [r for r in flats if r["ticker"] not in alerted_ids]
+    if remaining_flats:
+        lines.append("")
+        lines.append("⚪ <b>持平</b>")
+        for r in remaining_flats:
+            lines.append(_row_line(r))
+
+    # ── 抓取失敗 ──
+    if invalid:
+        lines.append("")
+        for r in invalid:
+            lines.append(f"⚪ <b>{_esc(r['ticker'])}</b>  報價載入失敗")
+
+    footer = f"\n共 {len(tickers)} 檔  |  ➜ /report 查看完整分析"
     if truncated:
-        footer = "⚠️ 清單超過 10 檔，僅顯示前 10  |  " + footer
+        footer = "\n⚠️ 超過 10 檔，僅顯示前 10  |  ➜ /report 查看完整分析"
     lines.append(footer)
 
     await loading.edit_text(

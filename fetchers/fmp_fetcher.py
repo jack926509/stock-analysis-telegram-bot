@@ -214,8 +214,15 @@ async def fetch_fmp_batch_prices(tickers: list[str]) -> dict[str, dict]:
                 "name": item.get("name", ""),
                 "day_high": item.get("dayHigh"),
                 "day_low": item.get("dayLow"),
+                "year_high": item.get("yearHigh"),
+                "year_low": item.get("yearLow"),
+                "price_avg_50": item.get("priceAvg50"),
+                "price_avg_200": item.get("priceAvg200"),
                 "volume": item.get("volume"),
+                "avg_volume": item.get("avgVolume"),
                 "market_cap": item.get("marketCap"),
+                "pe": item.get("pe"),
+                "earnings_announcement": item.get("earningsAnnouncement"),
             }
             for item in data
             if item.get("symbol")
