@@ -23,10 +23,11 @@
 
 - 🔍 **10+ 數據源並行** — Finnhub · FMP · yfinance · TradingView · Tavily · 宏觀 · 分析師 · 內部人 · EPS
 - 🧮 **12 維度量化信號** — 純 Python 規則引擎，獨立於 LLM 的「確定性」共識
-- 🤖 **Claude 四觀點深度分析** — 價值 / 成長 / 技術 / 風險，Prompt Caching 啟用
+- 🤖 **Claude 四觀點深度分析** — 價值 / 成長 / 技術 / 風險，Prompt Caching + compact context + 噪音過濾三重節流
+- ⭐ **自選股秒覽儀表板** — 總覽列、強弱排序、🚨 警示分組、52w 視覺長條 `▌▌▌░░░░░`、📅 財報臨近、🔄 強刷
 - 🛡️ **反幻覺四層防護** — 缺失即標 `N/A`，原始數據與 AI 分析同步展示供交叉驗證
 - 📈 **K 線圖 + 互動按鈕** — 60 日 MA5/20/60、「加入自選股 / 重新分析」InlineKeyboard
-- ⚡ **非同步 + LRU 快取** — `asyncio.gather` 並行、raw 30 分 / report 5 分雙層快取
+- ⚡ **非同步 + 三層快取** — `asyncio.gather` 並行；raw 30 分 / report 5 分 / watchlist 120 秒
 - 🏥 **生產級穩定性** — 健康檢查、Rate Limiting、Graceful Shutdown、FMP↔yfinance Fallback
 
 ---
@@ -85,10 +86,21 @@ python main.py
 
 | 指令 | 功能 |
 |---|---|
-| `/watchlist` | 自選股清單 + 即時報價 |
-| `/scan` | 批次快掃（報價 + 技術共識 + RSI） |
+| `/watchlist` | 即時報價儀表板：總覽列（漲跌數 / 平均%）、強弱排序、👑 最強 / ⚠️ 最弱、52w 視覺長條、📅 財報臨近、🔄 強刷按鈕（120 秒結果快取） |
+| `/scan` | 批次快掃進階版：🚨 警示分組（RSI 超買/超賣 · TV 強買/強賣 · 52w 高/低 · 量爆 · 財報 ≤7 天）+ 🟢 上漲 / 🔴 下跌分區 |
 | `/watch TICKER` | 加入自選股 |
 | `/unwatch TICKER` | 移除自選股 |
+
+> 📊 **/watchlist 範例顯示**
+> ```
+> 📋 自選股 (5 檔)  🟢3 漲 / 🔴2 跌  平均 +0.85%
+> 👑 最強 NVDA +3.21%  ⚠️ 最弱 TSLA -1.45%
+> 📅 財報臨近：AAPL(3天) · MSFT(5天)
+>
+> 🟢 NVDA  $750.21  +3.21%  📍▌▌▌▌▌▌▌▌ 96% 🔝  🔥2.1x量
+> 🟢 AAPL  $192.45  +1.23%  📍▌▌▌▌▌░░░ 72%  📅3天
+> 🔴 TSLA  $245.10  -1.45%  📍▌▌░░░░░░ 28%
+> ```
 
 ### 🧭 其他
 
@@ -238,7 +250,8 @@ stock-analysis-telegram-bot/
 | `APP_ENV` | `production` | `dev` / `staging` / `production`（影響 log 格式） |
 | `BOT_MODE` | `polling` | `polling` / `webhook` |
 | `WEBHOOK_URL` | — | webhook 模式必填 |
-| `ANTHROPIC_MODEL` | `claude-sonnet-4-6` | 可選 opus / haiku |
+| `ANTHROPIC_MODEL` | `claude-sonnet-4-6` | analyzer / writer 主模型，可選 opus / haiku |
+| `ANTHROPIC_PLANNER_MODEL` | `claude-haiku-4-5-20251001` | Newsletter planner 用（純 JSON 結構規劃，Haiku 即可勝任，成本約 1/10） |
 | `HEALTH_ENABLED` | `true` | `/health` HTTP 端點開關 |
 | `HEALTH_PORT` | `8080` | HTTP 端口 |
 | `RATE_LIMIT_PER_MINUTE` | `5` | 每用戶每分鐘請求上限 |
@@ -282,15 +295,40 @@ stock-analysis-telegram-bot/
 ### 關鍵設計決策
 
 - **FMP primary → yfinance fallback**：FMP 付費穩定為主力，yfinance 免費但限流時無縫備援
-- **Prompt Caching**：`system` prompt ≈ 2KB，第 2 次起 input token 折扣 ≈ 70%
+- **Claude 三重節流**：
+  - **Prompt Caching**：`system` prompt ≈ 2KB，第 2 次起 input token 折扣 ≈ 70%
+  - **Compact JSON context**：`separators=(",",":")` 移除縮排空白，再省 25–35% input tokens
+  - **噪音欄位過濾**：18 個對「解讀」零貢獻的欄位（`business_summary` / `description` / `logo_url` / `cusip` / `isin` / `cik` 等）送 AI 前剔除，formatter 仍正常顯示給使用者
+  - **Planner → Haiku**：Newsletter 規劃步驟（純 JSON 結構）改用 Haiku 4.5，成本約一個量級
+  - **`max_tokens` 收斂**：analyzer 4000→2800、writer 3000→2200、planner 2000→1200
 - **Telegram HTML parse mode**：取代 legacy Markdown，對 `&` / `_` / URL 破版容忍度遠高
 - **規則引擎 + LLM 分工**：純 Python 先算信號共識，LLM 只負責「解讀與交叉驗證」，降低幻覺
-- **LRU 分層快取**：raw 30 分鐘防重複 API，report 5 分鐘保即時性
+- **三層快取**：raw 30 分（API 數據）/ report 5 分（成品報告）/ watchlist 120 秒（per-user 報價結果）
 - **Per-user rate limit + Semaphore(3)**：防單用戶濫用 + 全域並發上限
 
 ---
 
 ## 📝 修改歷程
+
+### v5.2 — Watchlist 儀表板 v2 · Claude 三重節流 (2026-04-24)
+
+**自選股強化**
+- `/watchlist` 加入 **120 秒 per-user 結果快取**（LRU max 200）— 短時重覆敲指令不再重抓 FMP，命中時顯示 `⚡Ns 快取`
+- **52w 位置改為視覺化迷你長條** `▌▌▌░░░░░`（watchlist 8 字元 / scan 6 字元）— 一眼看出貴 / 便宜
+- **📅 財報臨近警示**：FMP `earnings_announcement` ≤7 天觸發，`/watchlist` 顯示「📅 財報臨近：AAPL(3天) · TSLA(5天)」摘要列＋每列 `📅N天` 標籤；`/scan` 列入 🚨 警示區
+- **🔄 強刷按鈕**：`wl_refresh` callback 繞過快取重抓 FMP
+
+**Claude API 費用精簡**（預估省 30–50% input tokens）
+- analyzer / planner / writer **全改 compact JSON**（`separators=(",", ":")`，移除縮排空白）
+- analyzer 新增 **`_AI_NOISE_KEYS` 過濾 18 個欄位**（`business_summary` / `description` / `logo_url` / `website` / `address` / `cusip` / `isin` / `cik` …），送 AI 前剔除，formatter 仍正常顯示
+- 新增 **`ANTHROPIC_PLANNER_MODEL`**（預設 `claude-haiku-4-5-20251001`），Newsletter planner 改 Haiku
+- **`max_tokens` 收斂**：analyzer 4000→2800、writer 3000→2200、planner 2000→1200
+
+### v5.1 — 自選股快覽強化（2026-04-23）
+
+- `/watchlist` 加入總覽列（漲跌數 / 平均 %）、強弱排序、👑 最強 / ⚠️ 最弱 highlight
+- `/scan` 重構為三段：🚨 警示 / 🟢 上漲 / 🔴 下跌 — 警示自動分組（RSI 超買/賣 · TV 強買/賣 · 52w 高/低 · 量爆）
+- `fetch_fmp_batch_prices` 擴充回傳欄位（52w 高低 / 50d 200d 均線 / 量能 / 市值 / earnings）— 零額外 API 成本
 
 ### v5.0 — Prompt Cache · 12 維度信號 · HTML 模式 (2026-04-23)
 
