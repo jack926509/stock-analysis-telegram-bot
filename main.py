@@ -49,13 +49,18 @@ async def _run_bot():
     app = create_bot_application()
 
     logger.info("✅ Bot 已啟動！等待指令中...")
-    logger.info("📌 可用指令: /start, /report [TICKER], /watchlist, /watch, /unwatch")
+    logger.info("📌 可用指令: /start, /help, /report, /chart, /compare, /watchlist, /scan, /watch, /unwatch")
 
     # 啟動 Bot
     if Config.BOT_MODE == "webhook":
         logger.info(f"🌐 使用 Webhook 模式: {Config.WEBHOOK_URL}")
         await app.initialize()
         await app.start()
+
+        # 註冊指令選單
+        from bot.telegram_bot import setup_bot_commands
+        await setup_bot_commands(app.bot)
+
         await app.updater.start_webhook(
             listen="0.0.0.0",
             port=int(Config.HEALTH_PORT) + 1,
@@ -119,8 +124,14 @@ def main():
             _run_polling_with_health()
         else:
             app = create_bot_application()
+
+            async def _post_init_minimal(application):
+                from bot.telegram_bot import setup_bot_commands
+                await setup_bot_commands(application.bot)
+
+            app.post_init = _post_init_minimal
             logger.info("✅ Bot 已啟動！等待指令中...")
-            logger.info("📌 可用指令: /start, /report, /watchlist, /watch, /unwatch")
+            logger.info("📌 可用指令: /start, /help, /report, /chart, /compare, /watchlist, /scan, /watch, /unwatch")
             app.run_polling(drop_pending_updates=True)
 
 
@@ -130,7 +141,10 @@ def _run_polling_with_health():
     app = create_bot_application()
 
     async def _post_init(application):
-        """Bot 啟動後的 hook，用來啟動健康檢查 + 日報生成。"""
+        """Bot 啟動後的 hook：指令選單 + 健康檢查 + (選用) 日報生成。"""
+        from bot.telegram_bot import setup_bot_commands
+        await setup_bot_commands(application.bot)
+
         try:
             from utils.health import start_health_server
             application.bot_data["health_runner"] = await start_health_server(
@@ -155,7 +169,7 @@ def _run_polling_with_health():
     app.post_shutdown = _post_shutdown
 
     logger.info("✅ Bot 已啟動！等待指令中...")
-    logger.info("📌 可用指令: /start, /report, /watchlist, /watch, /unwatch")
+    logger.info("📌 可用指令: /start, /help, /report, /chart, /compare, /watchlist, /scan, /watch, /unwatch")
     app.run_polling(drop_pending_updates=True)
 
 

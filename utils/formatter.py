@@ -1,14 +1,26 @@
 """
-報告格式化工具（v5 版面優化版）
-針對 Telegram 手機介面重新設計：
-- 合併為 8 大區塊，減少視覺雜訊
-- 量化共識移至頂部作為「結論先行」
-- 分析師/內部人/EPS 合併為「Smart Money」
-- 歷史/宏觀合併為「環境與動量」
-- 支撐壓力併入技術面
+報告格式化工具（HTML parse mode 版）
+- 採用 Telegram HTML parse mode（比 legacy Markdown 對特殊字元容忍度高）
+- 所有動態欄位經 html.escape 處理，避免 < > & 破版
+- 結論先行：量化共識置頂；分析師/內部人/EPS 合併為「Smart Money」
 """
 
+import html
 from datetime import datetime, timezone
+
+
+def _esc(value) -> str:
+    """HTML-escape any value (safe for None / numeric)."""
+    if value is None:
+        return ""
+    return html.escape(str(value), quote=False)
+
+
+def _esc_attr(value) -> str:
+    """HTML-escape for use inside attribute values (quotes escaped)."""
+    if value is None:
+        return ""
+    return html.escape(str(value), quote=True)
 
 
 def _safe(value, prefix="", suffix="") -> str:
@@ -125,9 +137,9 @@ def format_report(
     sector = yf.get("sector", "")
     industry = yf.get("industry", "")
 
-    L.append(f"📊 *{ticker.upper()} — {name}*")
+    L.append(f"📊 <b>{_esc(ticker.upper())} — {_esc(name)}</b>")
     if sector not in ("N/A", "") and industry not in ("N/A", ""):
-        L.append(f"{sector} · {industry}")
+        L.append(f"{_esc(sector)} · {_esc(industry)}")
 
     # Quick verdict line
     parts = []
@@ -154,7 +166,7 @@ def format_report(
         brc = signals_data.get("bearish_count", 0)
         nc = signals_data.get("neutral_count", 0)
         em = {"BULLISH": "🟢", "BEARISH": "🔴", "NEUTRAL": "🟡"}.get(con, "⚪")
-        L.append(f"🧮 {em} *{con}*  分數 {sc:+.3f}  信心 {conf}%  ({bc}多/{brc}空/{nc}中)")
+        L.append(f"🧮 {em} <b>{_esc(con)}</b>  分數 {sc:+.3f}  信心 {conf}%  ({bc}多/{brc}空/{nc}中)")
 
     L.append(DIV_BOLD)
 
@@ -181,14 +193,14 @@ def format_report(
             if bar:
                 L.append(f"  52W {bar}  (${_num(yf.get('52w_low'))}~${_num(yf.get('52w_high'))})")
     else:
-        L.append(f"💰 ⚠️ {fh.get('error', '報價不可用')}")
+        L.append(f"💰 ⚠️ {_esc(fh.get('error', '報價不可用'))}")
 
     # ════════════════════════════════════════
     # 3. FUNDAMENTALS (精簡)
     # ════════════════════════════════════════
     L.append("")
     L.append(f"{DIV}")
-    L.append("📈 *基本面*")
+    L.append("📈 <b>基本面</b>")
 
     if "error" not in yf:
         L.append(f"  市值 {yf.get('market_cap', 'N/A')}  Beta {_safe(yf.get('beta'))}")
@@ -300,14 +312,14 @@ def format_report(
                 for pp in peer_parts:
                     L.append(f"    {pp}")
     else:
-        L.append(f"  ⚠️ {yf.get('error', '基本面不可用')}")
+        L.append(f"  ⚠️ {_esc(yf.get('error', '基本面不可用'))}")
 
     # ════════════════════════════════════════
     # 4. TECHNICALS (含量能 + 支撐壓力)
     # ════════════════════════════════════════
     L.append("")
     L.append(f"{DIV}")
-    L.append("📊 *技術面*")
+    L.append("📊 <b>技術面</b>")
 
     if "error" not in tv:
         rec = tv.get("recommendation", "N/A")
@@ -396,7 +408,7 @@ def format_report(
                 if "support_60d" in sr and "resistance_60d" in sr:
                     L.append(f"  中期: 支撐 ${_num(sr['support_60d'])} / 壓力 ${_num(sr['resistance_60d'])}")
     else:
-        L.append(f"  ⚠️ {tv.get('error', '技術面不可用')}")
+        L.append(f"  ⚠️ {_esc(tv.get('error', '技術面不可用'))}")
 
     # ════════════════════════════════════════
     # 5. PERFORMANCE + MACRO (歷史表現 & 環境)
@@ -407,7 +419,7 @@ def format_report(
     if has_hist or has_macro:
         L.append("")
         L.append(f"{DIV}")
-        L.append("📉 *表現 & 環境*")
+        L.append("📉 <b>表現 &amp; 環境</b>")
 
         if has_hist:
             r7 = _ret(history_data.get("return_7d"))
@@ -463,7 +475,7 @@ def format_report(
     if has_analyst or has_insider or has_eps:
         L.append("")
         L.append(f"{DIV}")
-        L.append("🏦 *Smart Money*")
+        L.append("🏦 <b>Smart Money</b>")
 
         if has_analyst:
             con = analyst_data.get("consensus", "N/A")
@@ -506,7 +518,10 @@ def format_report(
 
                 notable = insider_data.get("notable_transactions", [])
                 for tx in notable[:3]:
-                    L.append(f"    {tx['type']} {tx['name']} ${_num(tx['value_usd'], 0)} ({tx['date']})")
+                    L.append(
+                        f"    {_esc(tx['type'])} {_esc(tx['name'])} "
+                        f"${_num(tx['value_usd'], 0)} ({_esc(tx['date'])})"
+                    )
 
         if has_eps:
             track = earnings_data.get("track_record", "N/A")
@@ -521,7 +536,10 @@ def format_report(
                 sp = q.get("surprise_pct", "N/A")
                 if sp != "N/A":
                     se = "🟢" if sp > 0 else "🔴"
-                    L.append(f"    {q['period']}: ${q['actual']} vs 預估${q['estimate']} ({se}{sp:+.1f}%)")
+                    L.append(
+                        f"    {_esc(q['period'])}: ${_esc(q['actual'])} "
+                        f"vs 預估${_esc(q['estimate'])} ({se}{sp:+.1f}%)"
+                    )
 
     # ════════════════════════════════════════
     # 7. SIGNALS DETAIL (量化信號明細)
@@ -531,44 +549,44 @@ def format_report(
         if signals:
             L.append("")
             L.append(f"{DIV}")
-            L.append("🧮 *量化信號引擎 (8維度)*")
+            L.append(f"🧮 <b>量化信號引擎 ({len(signals)} 維度)</b>")
             for s in signals:
                 se = {"bullish": "🟢", "bearish": "🔴"}.get(s.get("signal"), "🟡")
-                L.append(f"  {se} {s['name']}: {s.get('reason', '')}")
+                L.append(f"  {se} {_esc(s['name'])}: {_esc(s.get('reason', ''))}")
 
     # ════════════════════════════════════════
     # 8. NEWS
     # ════════════════════════════════════════
     L.append("")
     L.append(f"{DIV}")
-    L.append("📰 *新聞*")
+    L.append("📰 <b>新聞</b>")
 
     if "error" not in tavily_data:
         ai_sum = tavily_data.get("ai_summary", "")
         if ai_sum and ai_sum != "無法取得新聞摘要":
             summary = ai_sum[:150] + "..." if len(ai_sum) > 150 else ai_sum
-            L.append(f"  {summary}")
+            L.append(f"  {_esc(summary)}")
 
         news = tavily_data.get("news", [])
         if news:
             for i, n in enumerate(news[:3], 1):
                 title = n.get("title", "N/A")
                 url = n.get("url", "#")
-                L.append(f"  {i}. [{title}]({url})")
+                L.append(f"  {i}. <a href=\"{_esc_attr(url)}\">{_esc(title)}</a>")
         else:
             L.append("  暫無相關新聞")
     else:
-        L.append(f"  ⚠️ {tavily_data.get('error', '新聞不可用')}")
+        L.append(f"  ⚠️ {_esc(tavily_data.get('error', '新聞不可用'))}")
 
     # ════════════════════════════════════════
     # 9. AI ANALYSIS
     # ════════════════════════════════════════
     L.append("")
     L.append(DIV_BOLD)
-    L.append("🤖 *AI 四觀點深度分析*")
+    L.append("🤖 <b>AI 四觀點深度分析</b>")
     L.append(DIV_BOLD)
     L.append("")
-    L.append(ai_analysis)
+    L.append(_esc(ai_analysis))
 
     # ════════════════════════════════════════
     # FOOTER
@@ -577,6 +595,6 @@ def format_report(
     L.append("")
     L.append(DIV_BOLD)
     L.append("⚠️ 僅供參考研究，不構成投資建議。")
-    L.append(f"📅 {now} | 🛡️ Zero-Hallucination Engine v4.2")
+    L.append(f"📅 {now} | 🛡️ Zero-Hallucination Engine v5.0")
 
     return "\n".join(L)

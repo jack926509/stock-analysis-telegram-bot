@@ -11,17 +11,9 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 
 from config import Config
 from app.ai.exceptions import AIGenerationError
+from utils.ai_client import cached_system, get_ai_client
 
 logger = logging.getLogger("newsletter")
-
-_client: anthropic.AsyncAnthropic | None = None
-
-
-def _get_client() -> anthropic.AsyncAnthropic:
-    global _client
-    if _client is None:
-        _client = anthropic.AsyncAnthropic(api_key=Config.ANTHROPIC_API_KEY)
-    return _client
 
 
 WRITER_SYSTEM = """你是一位專業的美股市場日報撰寫者，擁有華爾街 20 年經驗。
@@ -75,7 +67,7 @@ async def write_newsletter(plan: dict, market_data: dict) -> str:
         str: 完整日報文字
     """
     try:
-        client = _get_client()
+        client = get_ai_client()
 
         user_prompt = f"""請根據以下規劃與市場數據，撰寫今日美股日報。
 
@@ -90,7 +82,7 @@ async def write_newsletter(plan: dict, market_data: dict) -> str:
         response = await client.messages.create(
             model=Config.ANTHROPIC_MODEL,
             max_tokens=3000,
-            system=WRITER_SYSTEM,
+            system=cached_system(WRITER_SYSTEM),
             messages=[
                 {"role": "user", "content": user_prompt},
             ],

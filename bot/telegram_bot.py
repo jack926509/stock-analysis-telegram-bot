@@ -1,22 +1,29 @@
 """
-Telegram Bot 介面模組（三角色優化版 v3）
-- 後端：超時控制、並發限制、return_exceptions、快取、Rate Limiting、查詢記錄
-- 前端：Markdown 安全發送、智能分段、自選股清單
-- 分析師：Tavily 搜尋加入公司全名、歷史回測、同業比較、支撐壓力位、ETF 支援
+Telegram Bot 介面模組（v5）
+- HTML parse mode（取代 legacy Markdown，對特殊字元更寬容）
+- 共用 _run_analysis(chat_id, user_id, ticker, bot)，移除 fake-update hack
+- 新增 /help /compare /chart 指令 + setMyCommands 選單
+- 輸入檢查、分析途中的 typing ChatAction、快取回應不發通知
 """
 
 import asyncio
+import html
 import logging
 import re
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import (
+    BotCommand,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Update,
+)
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
 )
-from telegram.constants import ParseMode
+from telegram.constants import ChatAction, ParseMode
 
 from config import Config
 from fetchers.finnhub_fetcher import fetch_finnhub_quote
@@ -53,14 +60,20 @@ FETCH_TIMEOUT = 45
 EXTENDED_FETCH_TIMEOUT = 60  # yfinance 重試最多 21s + 其他數據源
 AI_TIMEOUT = 90
 
-# ── ETF 支援：允許數字的 ticker 驗證 ──
-_TICKER_PATTERN = re.compile(r'^[A-Z]{1,5}$')
-_ETF_PATTERN = re.compile(r'^[A-Z0-9]{1,5}$')
+# ── Ticker 驗證：允許字母與數字（ETF / share class 支援）──
+_TICKER_PATTERN = re.compile(r"^[A-Z0-9]{1,5}$")
+
+
+def _esc(value) -> str:
+    """HTML escape helper for bot-side composed messages."""
+    if value is None:
+        return ""
+    return html.escape(str(value), quote=False)
 
 
 def _validate_ticker(ticker: str) -> bool:
-    """驗證 ticker 格式。支援股票（純字母）和 ETF（字母+數字）。"""
-    return bool(_ETF_PATTERN.match(ticker))
+    """Validate ticker symbol (letters + digits, 1–5 chars)."""
+    return bool(_TICKER_PATTERN.match(ticker))
 
 
 # ══════════════════════════════════════════
@@ -74,13 +87,16 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "👋 歡迎使用零幻覺美股分析 Bot!\n"
         "\n"
         "📌 指令：\n"
-        "  /report AAPL  — 完整深度分析報告\n"
+        "  /report AAPL — 完整深度分析報告\n"
+        "  /chart AAPL — 僅 60 日 K 線圖\n"
+        "  /compare AAPL MSFT NVDA — 多股橫向對比\n"
         "  /watchlist — 自選股清單（即時報價）\n"
         "  /scan — 自選股批次快掃總覽\n"
-        "  /watch AAPL — 加入 / /unwatch 移除\n"
+        "  /watch AAPL  /unwatch AAPL — 新增 / 移除\n"
+        "  /help — 詳細指令說明\n"
         "\n"
         "🔍 FMP + yfinance 雙源基本面\n"
-        "🧮 8 維度量化信號引擎\n"
+        "🧮 12 維度量化信號引擎\n"
         "🏦 分析師·內部人·EPS 驚喜\n"
         "🌍 VIX·殖利率 宏觀環境\n"
         "🤖 Claude 四觀點深度分析\n"
@@ -89,11 +105,33 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await update.message.reply_text(welcome_msg)
 
 
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """處理 /help 指令 — 詳細指令與用法說明。"""
+    msg = (
+        "<b>🧭 指令手冊</b>\n\n"
+        "<b>/report &lt;TICKER&gt;</b>\n"
+        "  產生完整深度分析報告，包含 12 維度量化信號 + Claude AI 分析。\n"
+        "  範例：<code>/report AAPL</code>\n\n"
+        "<b>/chart &lt;TICKER&gt;</b>\n"
+        "  只發送 60 日 K 線圖（MA5/MA20/MA60），不跑 AI 分析，秒回。\n"
+        "  範例：<code>/chart TSLA</code>\n\n"
+        "<b>/compare &lt;TICKER1&gt; &lt;TICKER2&gt; ...</b>\n"
+        "  並排對比 2–5 檔個股的即時價、建議、RSI、市值。\n"
+        "  範例：<code>/compare AAPL MSFT NVDA</code>\n\n"
+        "<b>/watchlist</b>\n"
+        "  顯示自選股即時報價。\n\n"
+        "<b>/scan</b>\n"
+        "  批次快掃自選股（報價 + 技術面共識 + RSI）。\n\n"
+        "<b>/watch &lt;TICKER&gt;</b> / <b>/unwatch &lt;TICKER&gt;</b>\n"
+        "  新增 / 移除自選股。\n\n"
+        "📡 資料來源：Finnhub · FMP · yfinance · TradingView · Tavily\n"
+        "🛡️ 反幻覺：所有 AI 分析皆需數據佐證，缺失即標 N/A。"
+    )
+    await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
+
+
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    處理 /report [TICKER] 指令。
-    核心流程：Rate Limit → 快取 → 並行抓取數據 → AI 分析 → 格式化報告 → 回傳。
-    """
+    """處理 /report [TICKER] 指令。"""
     if not context.args:
         await update.message.reply_text(
             "❌ 請提供股票代碼，例如：/report AAPL"
@@ -108,6 +146,7 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return
 
+    chat_id = update.effective_chat.id
     user_id = update.effective_user.id
 
     # ── Rate Limiting ──
@@ -119,11 +158,17 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return
 
+    await _dispatch_analysis(chat_id, user_id, ticker, context.bot)
+
+
+async def _dispatch_analysis(chat_id: int, user_id: int, ticker: str, bot) -> None:
+    """Common entry-point shared by /report command and InlineKeyboard callbacks."""
+
     # ── 記錄查詢 ──
     try:
         await record_query(user_id, ticker)
     except Exception:
-        pass  # 記錄失敗不影響核心功能
+        pass
 
     # ── 健康計數 ──
     try:
@@ -136,21 +181,28 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     cached_report = report_cache.get(ticker)
     if cached_report:
         age = report_cache.get_age(ticker) or 0
-        await update.message.reply_text(f"⚡ 使用 {age} 秒前的快取結果")
+        await bot.send_message(
+            chat_id=chat_id,
+            text=f"⚡ 使用 {age} 秒前的快取結果",
+            disable_notification=True,
+        )
         keyboard = _build_report_keyboard(ticker)
-        await _send_report(update, cached_report, reply_markup=keyboard)
+        await _send_report(chat_id, bot, cached_report, reply_markup=keyboard)
         return
 
     # ── 並發控制 ──
-    if _analysis_semaphore._value <= 0:
-        await update.message.reply_text(
-            f"⏳ 系統繁忙中，目前有多筆分析正在處理。\n"
-            f"請稍候片刻再重新查詢 /report {ticker}"
+    if _analysis_semaphore.locked():
+        await bot.send_message(
+            chat_id=chat_id,
+            text=(
+                f"⏳ 系統繁忙中，目前有 3 筆分析正在處理。\n"
+                f"請稍候片刻再重新查詢 /report {ticker}"
+            ),
         )
         return
 
     async with _analysis_semaphore:
-        await _execute_analysis(update, ticker)
+        await _execute_analysis(chat_id, ticker, bot)
 
 
 async def watchlist_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -170,7 +222,7 @@ async def watchlist_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     prices = await fetch_fmp_batch_prices(tickers)
 
-    lines = ["📋 *自選股清單*  ─  即時報價", ""]
+    lines = ["📋 <b>自選股清單</b>  ─  即時報價", ""]
     for i, t in enumerate(tickers, 1):
         quote = prices.get(t, {})
         if quote and quote.get("price") is not None:
@@ -180,11 +232,11 @@ async def watchlist_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             arrow = "🟢" if chg >= 0 else "🔴"
             sign = "+" if chg >= 0 else ""
             lines.append(
-                f"  {i}. *{t}*  ${price:.2f}  "
+                f"  {i}. <b>{_esc(t)}</b>  ${price:.2f}  "
                 f"{arrow}{sign}{chg:.2f} ({sign}{chg_pct:.2f}%)"
             )
         else:
-            lines.append(f"  {i}. *{t}*  報價載入中...")
+            lines.append(f"  {i}. <b>{_esc(t)}</b>  報價載入中...")
 
     lines.append(f"\n共 {len(tickers)} 檔  |  /scan 批次快掃")
 
@@ -195,16 +247,11 @@ async def watchlist_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         ]
     ])
 
-    try:
-        await loading.edit_text(
-            "\n".join(lines), parse_mode=ParseMode.MARKDOWN,
-            reply_markup=keyboard,
-        )
-    except Exception:
-        await loading.edit_text(
-            "\n".join(lines).replace("*", ""),
-            reply_markup=keyboard,
-        )
+    await loading.edit_text(
+        "\n".join(lines),
+        parse_mode=ParseMode.HTML,
+        reply_markup=keyboard,
+    )
 
 
 async def watch_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -245,20 +292,28 @@ async def unwatch_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """處理 /scan 指令：批次快掃自選股（報價 + 技術面 + 關鍵指標）。"""
+    chat_id = update.effective_chat.id
     user_id = update.effective_user.id
+    await _run_scan(chat_id, user_id, context.bot)
+
+
+async def _run_scan(chat_id: int, user_id: int, bot) -> None:
     tickers = await get_watchlist(user_id)
 
     if not tickers:
-        await update.message.reply_text(
-            "📋 自選股清單是空的。\n使用 /watch AAPL 加入股票"
+        await bot.send_message(
+            chat_id=chat_id,
+            text="📋 自選股清單是空的。\n使用 /watch AAPL 加入股票",
         )
         return
 
-    if len(tickers) > 10:
+    truncated = len(tickers) > 10
+    if truncated:
         tickers = tickers[:10]
 
-    loading = await update.message.reply_text(
-        f"🔍 正在掃描 {len(tickers)} 檔自選股..."
+    loading = await bot.send_message(
+        chat_id=chat_id,
+        text=f"🔍 正在掃描 {len(tickers)} 檔自選股...",
     )
 
     prices = await fetch_fmp_batch_prices(tickers)
@@ -272,7 +327,7 @@ async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     except asyncio.TimeoutError:
         ta_results = [{}] * len(tickers)
 
-    lines = ["📊 *自選股批次快掃*", ""]
+    lines = ["📊 <b>自選股批次快掃</b>", ""]
 
     for i, t in enumerate(tickers):
         quote = prices.get(t, {})
@@ -285,12 +340,11 @@ async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         sign = "+" if chg >= 0 else ""
 
         summary_val = ta.get("summary", {})
-        if isinstance(summary_val, dict):
-            rec = summary_val.get("RECOMMENDATION", "N/A")
-        else:
-            rec = "N/A"
+        rec = summary_val.get("RECOMMENDATION", "N/A") if isinstance(summary_val, dict) else "N/A"
+        if rec == "N/A":
+            rec = ta.get("recommendation", "N/A")
 
-        rsi_val = ta.get("rsi", "N/A")
+        rsi_val = ta.get("rsi_14", ta.get("rsi", "N/A"))
         if isinstance(rsi_val, (int, float)):
             if rsi_val > 70:
                 rsi_tag = "超買"
@@ -308,33 +362,152 @@ async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         rec_zh = rec_map.get(rec, rec)
 
         mcap = quote.get("market_cap")
+        cap_str = ""
         if mcap and isinstance(mcap, (int, float)):
             if mcap >= 1e12:
-                cap_str = f"{mcap/1e12:.1f}T"
+                cap_str = f"{mcap / 1e12:.1f}T"
             elif mcap >= 1e9:
-                cap_str = f"{mcap/1e9:.0f}B"
+                cap_str = f"{mcap / 1e9:.0f}B"
             else:
-                cap_str = f"{mcap/1e6:.0f}M"
-        else:
-            cap_str = ""
+                cap_str = f"{mcap / 1e6:.0f}M"
 
-        lines.append(f"*{t}* {price_str} {arrow}{sign}{chg_pct:.1f}%")
+        lines.append(f"<b>{_esc(t)}</b> {price_str} {arrow}{sign}{chg_pct:.1f}%")
         detail_parts = []
         if cap_str:
             detail_parts.append(cap_str)
-        detail_parts.append(f"TV:{rec_zh}")
-        detail_parts.append(f"RSI:{rsi_tag}")
-        lines.append(f"  {' | '.join(detail_parts)}  ➜ /report {t}")
+        detail_parts.append(f"TV:{_esc(rec_zh)}")
+        detail_parts.append(f"RSI:{_esc(rsi_tag)}")
+        lines.append(f"  {' | '.join(detail_parts)}  ➜ /report {_esc(t)}")
         lines.append("")
 
-    lines.append(f"共 {len(tickers)} 檔  |  點選 /report 查看完整分析")
+    footer = f"共 {len(tickers)} 檔  |  點選 /report 查看完整分析"
+    if truncated:
+        footer = "⚠️ 清單超過 10 檔，僅顯示前 10  |  " + footer
+    lines.append(footer)
 
-    try:
-        await loading.edit_text(
-            "\n".join(lines), parse_mode=ParseMode.MARKDOWN,
+    await loading.edit_text(
+        "\n".join(lines),
+        parse_mode=ParseMode.HTML,
+    )
+
+
+async def chart_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """處理 /chart [TICKER]：僅回傳 60 日 K 線圖，不做 AI 分析。"""
+    if not context.args:
+        await update.message.reply_text("❌ 請提供股票代碼，例如：/chart AAPL")
+        return
+
+    ticker = context.args[0].upper()
+    if not _validate_ticker(ticker):
+        await update.message.reply_text("❌ 無效的股票代碼")
+        return
+
+    user_id = update.effective_user.id
+    if not rate_limiter.is_allowed(user_id):
+        wait = rate_limiter.retry_after(user_id)
+        await update.message.reply_text(f"⏰ 請 {wait} 秒後再試")
+        return
+
+    chat_id = update.effective_chat.id
+    await context.bot.send_chat_action(chat_id, ChatAction.UPLOAD_PHOTO)
+
+    chart_buf = await generate_chart(ticker)
+    if not chart_buf:
+        await update.message.reply_text(
+            f"❌ 無法生成 {ticker} 的 K 線圖（資料源可能暫時不可用）"
         )
-    except Exception:
-        await loading.edit_text("\n".join(lines).replace("*", ""))
+        return
+
+    await update.message.reply_photo(
+        photo=chart_buf,
+        caption=f"📈 {ticker} — 60 日 K 線圖（MA5/MA20/MA60）",
+    )
+
+
+async def compare_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """處理 /compare TICKER1 TICKER2 ...：並排比較 2-5 檔個股。"""
+    if not context.args or len(context.args) < 2:
+        await update.message.reply_text(
+            "❌ 請提供至少 2 檔股票代碼，例如：/compare AAPL MSFT NVDA"
+        )
+        return
+
+    tickers = [t.upper() for t in context.args[:5]]
+    invalid = [t for t in tickers if not _validate_ticker(t)]
+    if invalid:
+        await update.message.reply_text(f"❌ 無效的股票代碼：{', '.join(invalid)}")
+        return
+
+    user_id = update.effective_user.id
+    if not rate_limiter.is_allowed(user_id):
+        wait = rate_limiter.retry_after(user_id)
+        await update.message.reply_text(f"⏰ 請 {wait} 秒後再試")
+        return
+
+    chat_id = update.effective_chat.id
+    await context.bot.send_chat_action(chat_id, ChatAction.TYPING)
+
+    loading = await update.message.reply_text(
+        f"⚖️ 正在並排比較 {len(tickers)} 檔..."
+    )
+
+    prices = await fetch_fmp_batch_prices(tickers)
+    ta_tasks = [fetch_tradingview_analysis(t) for t in tickers]
+    try:
+        ta_results = await asyncio.wait_for(
+            asyncio.gather(*ta_tasks, return_exceptions=True),
+            timeout=20,
+        )
+    except asyncio.TimeoutError:
+        ta_results = [{}] * len(tickers)
+
+    lines = ["⚖️ <b>個股對比</b>", ""]
+    rec_map = {
+        "STRONG_BUY": "🟢 強買", "BUY": "🟢 買入",
+        "NEUTRAL": "🟡 中性", "SELL": "🔴 賣出", "STRONG_SELL": "🔴 強賣",
+    }
+
+    for i, t in enumerate(tickers):
+        quote = prices.get(t, {})
+        ta = _ensure_dict(ta_results[i], "TA") if i < len(ta_results) else {}
+
+        price = quote.get("price")
+        price_str = f"${price:.2f}" if isinstance(price, (int, float)) else "N/A"
+        chg_pct = quote.get("change_pct", 0) or 0
+        arrow = "🟢" if chg_pct >= 0 else "🔴"
+        sign = "+" if chg_pct >= 0 else ""
+
+        rec = ta.get("recommendation", "N/A")
+        rec_str = rec_map.get(rec, f"⚪ {rec}")
+
+        rsi = ta.get("rsi_14", "N/A")
+        if isinstance(rsi, (int, float)):
+            rsi_str = f"{rsi:.0f}"
+            if rsi > 70:
+                rsi_str += " ⚠️超買"
+            elif rsi < 30:
+                rsi_str += " ⚠️超賣"
+        else:
+            rsi_str = "N/A"
+
+        mcap = quote.get("market_cap")
+        cap_str = ""
+        if mcap and isinstance(mcap, (int, float)):
+            if mcap >= 1e12:
+                cap_str = f"{mcap / 1e12:.2f}T"
+            elif mcap >= 1e9:
+                cap_str = f"{mcap / 1e9:.1f}B"
+            else:
+                cap_str = f"{mcap / 1e6:.0f}M"
+
+        lines.append(f"<b>{_esc(t)}</b> — {price_str} {arrow}{sign}{chg_pct:.2f}%")
+        lines.append(f"  建議: {rec_str}  |  RSI: {_esc(rsi_str)}")
+        if cap_str:
+            lines.append(f"  市值: {cap_str}")
+        lines.append("")
+
+    lines.append("➜ /report TICKER 查看單檔完整分析")
+    await loading.edit_text("\n".join(lines), parse_mode=ParseMode.HTML)
 
 
 # ══════════════════════════════════════════
@@ -342,14 +515,17 @@ async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 # ══════════════════════════════════════════
 
 
-async def _execute_analysis(update: Update, ticker: str) -> None:
+async def _execute_analysis(chat_id: int, ticker: str, bot) -> None:
     """執行完整分析流程（被 semaphore 控制並發）。"""
 
-    loading_msg = await update.message.reply_text(
-        f"⏳ 正在分析 {ticker}...\n📡 並行抓取 10+ 數據源中..."
+    loading_msg = await bot.send_message(
+        chat_id=chat_id,
+        text=f"⏳ 正在分析 {ticker}...\n📡 並行抓取 10+ 數據源中...",
     )
 
     try:
+        await bot.send_chat_action(chat_id, ChatAction.TYPING)
+
         # ── Step 1: 並行抓取基礎數據（帶 raw 快取）──
         cached_raw = raw_cache.get(f"{ticker}:base")
         if cached_raw:
@@ -388,7 +564,7 @@ async def _execute_analysis(update: Update, ticker: str) -> None:
             raw_cache.set(f"{ticker}:base", (finnhub_data, yfinance_data, tradingview_data))
             logger.info(f"[{ticker}] 基礎數據抓取完成 (源: {yfinance_data.get('source', '?')})")
 
-        # ── Step 1.5: 並行抓取擴展數據（Tavily + 歷史 + 同業 + 分析師 + 內部人 + EPS + 宏觀）──
+        # ── Step 1.5: 擴展數據（Tavily + 歷史 + 同業 + 分析師 + 內部人 + EPS + 宏觀）──
         company_name = yfinance_data.get("company_name", "")
         sector = yfinance_data.get("sector", "")
         industry = yfinance_data.get("industry", "")
@@ -427,7 +603,6 @@ async def _execute_analysis(update: Update, ticker: str) -> None:
             ext_results = [{"source": "extended", "error": "擴展數據超時"}] * len(extended_tasks)
             chart_buf = None
 
-        # 解析擴展結果（按 task_labels 順序）
         ext_map = {}
         for i, label in enumerate(task_labels):
             ext_map[label] = _ensure_dict(ext_results[i], label) if i < len(ext_results) else {}
@@ -440,7 +615,7 @@ async def _execute_analysis(update: Update, ticker: str) -> None:
         earnings_data = ext_map.get("Earnings", {})
         macro_data = ext_map.get("Macro", {})
 
-        # ── Step 1.6: 計算量化信號共識 ──
+        # ── Step 1.6: 12 維度量化信號共識 ──
         signals_data = compute_signals(
             finnhub_data=finnhub_data,
             yfinance_data=yfinance_data,
@@ -448,12 +623,17 @@ async def _execute_analysis(update: Update, ticker: str) -> None:
             history_data=history_data if history_data and "error" not in history_data else None,
             peer_data=peer_data if peer_data and "error" not in peer_data else None,
             analyst_data=analyst_data if analyst_data and "error" not in analyst_data else None,
+            insider_data=insider_data if insider_data and "error" not in insider_data else None,
+            earnings_data=earnings_data if earnings_data and "error" not in earnings_data else None,
+            macro_data=macro_data if macro_data and "error" not in macro_data else None,
         )
 
-        total_sources = 6 + sum(1 for d in [history_data, peer_data, analyst_data, insider_data, earnings_data, macro_data] if d and "error" not in d)
+        total_sources = 6 + sum(
+            1 for d in [history_data, peer_data, analyst_data, insider_data, earnings_data, macro_data]
+            if d and "error" not in d
+        )
         logger.info(f"[{ticker}] 所有數據抓取完成（{total_sources} 源），開始 AI 分析...")
 
-        # 更新載入訊息
         try:
             await loading_msg.edit_text(
                 f"⏳ 正在分析 {ticker}...\n"
@@ -463,6 +643,8 @@ async def _execute_analysis(update: Update, ticker: str) -> None:
             )
         except Exception:
             pass
+
+        await bot.send_chat_action(chat_id, ChatAction.TYPING)
 
         # ── Step 2: AI 分析 ──
         try:
@@ -491,7 +673,7 @@ async def _execute_analysis(update: Update, ticker: str) -> None:
             macro_data=macro_data,
         )
 
-        # ── Step 4: 快取並發送報告 ──
+        # ── Step 4: 快取並發送 ──
         report_cache.set(ticker, report)
 
         try:
@@ -501,7 +683,8 @@ async def _execute_analysis(update: Update, ticker: str) -> None:
 
         if chart_buf:
             try:
-                await update.message.reply_photo(
+                await bot.send_photo(
+                    chat_id=chat_id,
                     photo=chart_buf,
                     caption=f"📈 {ticker.upper()} — 60 日 K 線圖（MA5/MA20/MA60）",
                 )
@@ -509,7 +692,7 @@ async def _execute_analysis(update: Update, ticker: str) -> None:
                 logger.warning(f"[{ticker}] K 線圖發送失敗: {chart_err}")
 
         keyboard = _build_report_keyboard(ticker)
-        await _send_report(update, report, reply_markup=keyboard)
+        await _send_report(chat_id, bot, report, reply_markup=keyboard)
         logger.info(f"[{ticker}] 報告已發送")
 
     except asyncio.TimeoutError:
@@ -520,7 +703,7 @@ async def _execute_analysis(update: Update, ticker: str) -> None:
                 f"請稍後再試：/report {ticker}"
             )
         except Exception:
-            await update.message.reply_text(f"❌ 分析 {ticker} 超時，請稍後再試。")
+            await bot.send_message(chat_id=chat_id, text=f"❌ 分析 {ticker} 超時，請稍後再試。")
 
     except Exception as e:
         logger.error(f"[{ticker}] 分析失敗: {e}", exc_info=True)
@@ -529,7 +712,7 @@ async def _execute_analysis(update: Update, ticker: str) -> None:
             await loading_msg.edit_text(error_msg)
         except Exception:
             try:
-                await update.message.reply_text(error_msg)
+                await bot.send_message(chat_id=chat_id, text=error_msg)
             except Exception:
                 pass
 
@@ -559,27 +742,29 @@ def _ensure_dict(result, source_name: str) -> dict:
     return {"source": source_name, "error": f"{source_name} 回傳格式異常"}
 
 
-async def _send_report(update: Update, report: str,
-                       reply_markup=None) -> None:
-    """安全發送報告。先嘗試 Markdown，失敗用純文字。最後一段附帶 reply_markup。"""
+async def _send_report(chat_id: int, bot, report: str, reply_markup=None) -> None:
+    """安全發送報告（HTML parse mode；失敗時退回純文字）。"""
     chunks = _split_message(report, 4096)
 
     for i, chunk in enumerate(chunks):
         is_last = (i == len(chunks) - 1)
         markup = reply_markup if is_last else None
         try:
-            await update.message.reply_text(
-                chunk,
-                parse_mode=ParseMode.MARKDOWN,
+            await bot.send_message(
+                chat_id=chat_id,
+                text=chunk,
+                parse_mode=ParseMode.HTML,
                 disable_web_page_preview=True,
                 reply_markup=markup,
             )
-        except Exception as md_err:
-            logger.warning(f"Markdown 發送失敗: {md_err}")
-            clean = chunk.replace("*", "").replace("_", "").replace("`", "")
+        except Exception as html_err:
+            logger.warning(f"HTML 發送失敗，降級純文字: {html_err}")
+            # 移除 HTML 標籤後重發
+            plain = re.sub(r"<[^>]+>", "", chunk)
             try:
-                await update.message.reply_text(
-                    clean,
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text=plain,
                     disable_web_page_preview=True,
                     reply_markup=markup,
                 )
@@ -621,6 +806,8 @@ async def _inline_button_handler(update: Update, context: ContextTypes.DEFAULT_T
     query = update.callback_query
     data = query.data or ""
     user_id = query.from_user.id
+    chat_id = query.message.chat_id
+    bot = context.bot
 
     if data.startswith("watch:"):
         ticker = data.split(":", 1)[1]
@@ -645,38 +832,25 @@ async def _inline_button_handler(update: Update, context: ContextTypes.DEFAULT_T
             return
         await query.answer(f"🔄 正在重新分析 {ticker}...")
         try:
-            await record_query(user_id, ticker)
-        except Exception:
-            pass
-        try:
             await query.edit_message_reply_markup(reply_markup=None)
         except Exception:
             pass
         report_cache.invalidate(ticker)
         raw_cache.invalidate(f"{ticker}:base")
-        fake_update = Update(update_id=update.update_id, message=query.message)
-        async with _analysis_semaphore:
-            await _execute_analysis(fake_update, ticker)
+        await _dispatch_analysis(chat_id, user_id, ticker, bot)
 
     elif data.startswith("report:"):
         ticker = data.split(":", 1)[1]
-        await query.answer(f"📈 正在分析 {ticker}...")
         if not rate_limiter.is_allowed(user_id):
             wait = rate_limiter.retry_after(user_id)
             await query.answer(f"⏰ 請 {wait} 秒後再試", show_alert=True)
             return
-        try:
-            await record_query(user_id, ticker)
-        except Exception:
-            pass
-        fake_update = Update(update_id=update.update_id, message=query.message)
-        async with _analysis_semaphore:
-            await _execute_analysis(fake_update, ticker)
+        await query.answer(f"📈 正在分析 {ticker}...")
+        await _dispatch_analysis(chat_id, user_id, ticker, bot)
 
     elif data == "scanall":
         await query.answer("🔍 開始批次快掃...")
-        fake_update = Update(update_id=update.update_id, message=query.message)
-        await scan_command(fake_update, context)
+        await _run_scan(chat_id, user_id, bot)
 
     elif data == "manage_wl":
         tickers = await get_watchlist(user_id)
@@ -688,7 +862,7 @@ async def _inline_button_handler(update: Update, context: ContextTypes.DEFAULT_T
         for t in tickers:
             buttons.append([
                 InlineKeyboardButton(f"📈 {t}", callback_data=f"report:{t}"),
-                InlineKeyboardButton(f"❌ 移除", callback_data=f"unwatchcb:{t}"),
+                InlineKeyboardButton("❌ 移除", callback_data=f"unwatchcb:{t}"),
             ])
         buttons.append([InlineKeyboardButton("🔙 返回", callback_data="back_wl")])
         try:
@@ -709,7 +883,7 @@ async def _inline_button_handler(update: Update, context: ContextTypes.DEFAULT_T
                 for t in tickers:
                     buttons.append([
                         InlineKeyboardButton(f"📈 {t}", callback_data=f"report:{t}"),
-                        InlineKeyboardButton(f"❌ 移除", callback_data=f"unwatchcb:{t}"),
+                        InlineKeyboardButton("❌ 移除", callback_data=f"unwatchcb:{t}"),
                     ])
                 buttons.append([InlineKeyboardButton("🔙 返回", callback_data="back_wl")])
                 try:
@@ -753,13 +927,36 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
             pass
 
 
+async def setup_bot_commands(bot) -> None:
+    """註冊 Telegram 指令選單，在聊天介面左下角提供指令建議。"""
+    commands = [
+        BotCommand("start", "查看歡迎訊息"),
+        BotCommand("help", "指令手冊"),
+        BotCommand("report", "完整深度分析報告（需股票代碼）"),
+        BotCommand("chart", "僅 K 線圖（需股票代碼）"),
+        BotCommand("compare", "多股對比（2-5 檔代碼）"),
+        BotCommand("watchlist", "自選股清單與即時報價"),
+        BotCommand("scan", "自選股批次快掃"),
+        BotCommand("watch", "加入自選股"),
+        BotCommand("unwatch", "移除自選股"),
+    ]
+    try:
+        await bot.set_my_commands(commands)
+        logger.info("✅ Bot 指令選單已註冊")
+    except Exception as e:
+        logger.warning(f"⚠️ 指令選單註冊失敗: {e}")
+
+
 def create_bot_application() -> Application:
     """建立並設定 Telegram Bot Application。"""
     app = Application.builder().token(Config.TELEGRAM_BOT_TOKEN).build()
 
     # 分析指令
     app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("report", report_command))
+    app.add_handler(CommandHandler("chart", chart_command))
+    app.add_handler(CommandHandler("compare", compare_command))
 
     # 自選股指令
     app.add_handler(CommandHandler("watchlist", watchlist_command))

@@ -13,18 +13,9 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 
 from config import Config
 from app.ai.exceptions import AIGenerationError
+from utils.ai_client import cached_system, get_ai_client
 
 logger = logging.getLogger("newsletter")
-
-# 共用 client
-_client: anthropic.AsyncAnthropic | None = None
-
-
-def _get_client() -> anthropic.AsyncAnthropic:
-    global _client
-    if _client is None:
-        _client = anthropic.AsyncAnthropic(api_key=Config.ANTHROPIC_API_KEY)
-    return _client
 
 
 PLANNER_SYSTEM = """你是一位資深美股市場策略分析師，負責規劃每日美股日報的內容結構。
@@ -78,7 +69,7 @@ async def plan_newsletter(market_data: dict) -> dict:
         dict: 規劃結果（主題、重點個股、風險等）
     """
     try:
-        client = _get_client()
+        client = get_ai_client()
 
         user_prompt = f"""請根據以下今日市場數據，規劃美股日報內容。
 
@@ -87,12 +78,10 @@ async def plan_newsletter(market_data: dict) -> dict:
 
 請以 JSON 格式回傳規劃結果："""
 
-        # ✅ 正確寫法：使用 client.messages.create()
-        # ❌ 不要用 .parse()（那是 OpenAI SDK 的方法）
         response = await client.messages.create(
             model=Config.ANTHROPIC_MODEL,
             max_tokens=2000,
-            system=PLANNER_SYSTEM,
+            system=cached_system(PLANNER_SYSTEM),
             messages=[
                 {"role": "user", "content": user_prompt},
             ],

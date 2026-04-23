@@ -1,27 +1,14 @@
 """
-Anthropic Claude AI 分析引擎（三角色優化版）
-- 分析師：加入成交量分析、成長性評估、量化評分框架
-- 前端：控制輸出格式避免破壞 Telegram Markdown
-- 後端：共用 client 實例、超時控制
+Anthropic Claude AI 分析引擎。
+- 透過 utils.ai_client 共用 AsyncAnthropic 實例
+- 系統提示使用 Prompt Caching（cache_control=ephemeral）以降低 token 成本
+- 輸出純文字，在 formatter 層統一做 HTML 跳脫
 """
 
 import json
-import re
-
-import anthropic
 
 from config import Config
-
-# 共用 client 實例（後端優化：避免每次重建）
-_anthropic_client: anthropic.AsyncAnthropic | None = None
-
-
-def _get_client() -> anthropic.AsyncAnthropic:
-    """取得共用的 AsyncAnthropic client。"""
-    global _anthropic_client
-    if _anthropic_client is None:
-        _anthropic_client = anthropic.AsyncAnthropic(api_key=Config.ANTHROPIC_API_KEY)
-    return _anthropic_client
+from utils.ai_client import cached_system, get_ai_client
 
 
 # ──────────────────────────────────────────────
@@ -197,7 +184,7 @@ async def analyze_stock(
         str: AI 生成的分析文本
     """
     try:
-        client = _get_client()
+        client = get_ai_client()
 
         context = _build_context(
             finnhub_data, yfinance_data, tavily_data, tradingview_data,
@@ -219,7 +206,7 @@ async def analyze_stock(
         response = await client.messages.create(
             model=Config.ANTHROPIC_MODEL,
             max_tokens=4000,
-            system=SYSTEM_PROMPT,
+            system=cached_system(SYSTEM_PROMPT),
             messages=[
                 {"role": "user", "content": user_prompt},
             ],
@@ -227,32 +214,7 @@ async def analyze_stock(
             timeout=60,
         )
 
-        analysis = response.content[0].text
-
-        # 前端優化：清理 AI 回傳中可能破壞 Telegram Markdown 的字元
-        analysis = _clean_markdown_conflicts(analysis)
-
-        return analysis
+        return response.content[0].text
 
     except Exception as e:
         return f"❌ AI 分析引擎錯誤: {str(e)}\n\n請檢查 Anthropic API Key 是否有效。"
-
-
-def _clean_markdown_conflicts(text: str) -> str:
-    """
-    清理 AI 回傳文字中可能與 Telegram Markdown 衝突的字元。
-    因為報告的標題區使用了 *bold*，AI 回傳中的 * 和 _ 需要移除。
-    """
-    if not text:
-        return text
-    # 移除 Markdown 標記，因為我們的 formatter 已經處理了格式
-    text = text.replace("**", "")
-    text = text.replace("###", "")
-    text = text.replace("##", "")
-    text = text.replace("# ", "")
-    # 移除可能破壞 Telegram Markdown 的底線（保留數字間的底線如 52_week）
-    # 處理 _斜體_ 格式
-    text = re.sub(r'(?<!\w)_([^_]+)_(?!\w)', r'\1', text)
-    # 移除反引號
-    text = text.replace("`", "")
-    return text

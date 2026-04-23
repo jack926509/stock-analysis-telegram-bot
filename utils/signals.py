@@ -365,18 +365,138 @@ def _sentiment_signal(tv: dict, analyst: dict | None) -> dict:
 
 
 # ═══════════════════════════════════════════
+# 新增：內部人 / EPS 紀錄 / 宏觀 / 相對強弱
+# ═══════════════════════════════════════════
+
+def _insider_signal(insider: dict | None) -> dict:
+    if not insider or "error" in insider:
+        return _signal("內部人動向", "neutral", 0.0, "數據不足")
+
+    total_tx = insider.get("total_transactions", 0)
+    if not total_tx:
+        return _signal("內部人動向", "neutral", 0.0, "近 90 天無內部人交易")
+
+    sentiment = insider.get("net_sentiment", "neutral")
+    bv = insider.get("buy_value", 0) or 0
+    sv = insider.get("sell_value", 0) or 0
+    bc = insider.get("buy_count", 0) or 0
+    sc = insider.get("sell_count", 0) or 0
+
+    reason = f"買{bc}筆(${bv:,.0f})/賣{sc}筆(${sv:,.0f})"
+    if sentiment == "bullish":
+        return _signal("內部人動向", "bullish", 1.0, f"內部人淨買入 | {reason}")
+    if sentiment == "bearish":
+        return _signal("內部人動向", "bearish", -1.0, f"內部人淨賣出 | {reason}")
+    return _signal("內部人動向", "neutral", 0.0, reason)
+
+
+def _earnings_consistency_signal(earnings: dict | None) -> dict:
+    if not earnings or "error" in earnings:
+        return _signal("EPS 紀錄", "neutral", 0.0, "數據不足")
+
+    total = earnings.get("total_quarters", 0) or 0
+    if total == 0:
+        return _signal("EPS 紀錄", "neutral", 0.0, "無 EPS 歷史")
+
+    beat = earnings.get("beat_count", 0) or 0
+    miss = earnings.get("miss_count", 0) or 0
+    track = earnings.get("track_record", "mixed")
+    reason = f"{beat}/{total} 季超預期"
+
+    if track in ("excellent",):
+        return _signal("EPS 紀錄", "bullish", 1.0, f"連續達標 | {reason}")
+    if track == "good":
+        return _signal("EPS 紀錄", "bullish", 0.5, reason)
+    if track == "poor" or miss >= total * 0.75:
+        return _signal("EPS 紀錄", "bearish", -1.0, f"常態低於預期 | {reason}")
+    return _signal("EPS 紀錄", "neutral", 0.0, reason)
+
+
+def _macro_signal(macro: dict | None) -> dict:
+    if not macro or "error" in macro:
+        return _signal("宏觀環境", "neutral", 0.0, "數據不足")
+
+    regime = macro.get("risk_environment", "N/A")
+    vix = macro.get("vix", "N/A")
+    us10y = macro.get("us10y", "N/A")
+    label = macro.get("risk_label", "")
+
+    parts = []
+    if vix != "N/A":
+        parts.append(f"VIX {vix}")
+    if us10y != "N/A":
+        parts.append(f"10Y {us10y}%")
+    if label:
+        parts.append(label)
+    reason = " | ".join(parts) if parts else "數據不足"
+
+    if regime == "risk_on":
+        return _signal("宏觀環境", "bullish", 1.0, reason)
+    if regime == "risk_off":
+        return _signal("宏觀環境", "bearish", -1.0, reason)
+    return _signal("宏觀環境", "neutral", 0.0, reason)
+
+
+def _relative_strength_signal(hist: dict | None) -> dict:
+    if not hist or "error" in hist:
+        return _signal("相對強弱", "neutral", 0.0, "數據不足")
+
+    a30 = hist.get("alpha_vs_spy_30d", "N/A")
+    a90 = hist.get("alpha_vs_spy_90d", "N/A")
+
+    pts = 0
+    reasons = []
+    try:
+        if a30 != "N/A":
+            v = float(a30)
+            reasons.append(f"30d Alpha {v:+.1f}%")
+            if v > 5:
+                pts += 1
+            elif v < -5:
+                pts -= 1
+    except (ValueError, TypeError):
+        pass
+
+    try:
+        if a90 != "N/A":
+            v = float(a90)
+            reasons.append(f"90d Alpha {v:+.1f}%")
+            if v > 10:
+                pts += 1
+            elif v < -10:
+                pts -= 1
+    except (ValueError, TypeError):
+        pass
+
+    reason = " | ".join(reasons) or "數據不足"
+    if pts >= 2:
+        return _signal("相對強弱", "bullish", 1.0, f"持續跑贏大盤 | {reason}")
+    if pts >= 1:
+        return _signal("相對強弱", "bullish", 0.5, reason)
+    if pts <= -2:
+        return _signal("相對強弱", "bearish", -1.0, f"持續跑輸大盤 | {reason}")
+    if pts <= -1:
+        return _signal("相對強弱", "bearish", -0.5, reason)
+    return _signal("相對強弱", "neutral", 0.0, reason)
+
+
+# ═══════════════════════════════════════════
 # 主函數：計算所有信號 + 共識投票
 # ═══════════════════════════════════════════
 
 WEIGHTS = {
-    "獲利能力": 0.15,
-    "成長動能": 0.10,
-    "財務健康": 0.10,
-    "估值": 0.15,
-    "趨勢": 0.15,
-    "動量": 0.15,
-    "波動率": 0.05,
-    "市場情緒": 0.15,
+    "獲利能力": 0.12,
+    "成長動能": 0.08,
+    "財務健康": 0.08,
+    "估值": 0.12,
+    "趨勢": 0.12,
+    "動量": 0.10,
+    "波動率": 0.03,
+    "市場情緒": 0.10,
+    "內部人動向": 0.08,
+    "EPS 紀錄": 0.07,
+    "宏觀環境": 0.05,
+    "相對強弱": 0.05,
 }
 
 
@@ -387,9 +507,12 @@ def compute_signals(
     history_data: dict | None = None,
     peer_data: dict | None = None,
     analyst_data: dict | None = None,
+    insider_data: dict | None = None,
+    earnings_data: dict | None = None,
+    macro_data: dict | None = None,
 ) -> dict:
     """
-    計算量化信號共識。
+    計算量化信號共識（12 維度）。
 
     Returns:
         dict: {
@@ -410,6 +533,10 @@ def compute_signals(
         _momentum_signal(tradingview_data, history_data),
         _volatility_signal(history_data),
         _sentiment_signal(tradingview_data, analyst_data),
+        _insider_signal(insider_data),
+        _earnings_consistency_signal(earnings_data),
+        _macro_signal(macro_data),
+        _relative_strength_signal(history_data),
     ]
 
     bullish = sum(1 for s in signals if s["signal"] == "bullish")
