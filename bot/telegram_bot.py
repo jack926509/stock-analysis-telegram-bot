@@ -10,6 +10,8 @@ import asyncio
 import html
 import logging
 import re
+import time
+from datetime import datetime, timezone
 
 from telegram import (
     BotCommand,
@@ -110,6 +112,61 @@ def _fmt_mcap(mcap) -> str:
     if mcap >= 1e6:
         return f"{mcap / 1e6:.0f}M"
     return f"{mcap:,.0f}"
+
+
+def _pos52_bar(pos, length: int = 8) -> str:
+    """52w 區間視覺化進度條（▌ 已填 / ░ 未填）。"""
+    if pos is None:
+        return ""
+    try:
+        filled = max(0, min(length, round(float(pos) / 100 * length)))
+    except (ValueError, TypeError):
+        return ""
+    return "▌" * filled + "░" * (length - filled)
+
+
+def _earnings_days(earnings_str) -> int | None:
+    """距離財報的整日數（0–7 才回傳；今日=0、明日=1）。FMP 格式：'2025-01-30T21:00:00.000+0000'。"""
+    if not earnings_str or not isinstance(earnings_str, str) or len(earnings_str) < 10:
+        return None
+    try:
+        target = datetime.strptime(earnings_str[:10], "%Y-%m-%d").date()
+        today = datetime.now(timezone.utc).date()
+        days = (target - today).days
+        return days if 0 <= days <= 7 else None
+    except (ValueError, TypeError):
+        return None
+
+
+# ── /watchlist 結果快取（避免短時重覆敲指令吃光 FMP 配額）──
+_WL_CACHE_TTL = 120  # 秒
+_WL_CACHE_MAX = 200
+_watchlist_cache: dict[tuple, tuple[dict, float]] = {}
+
+
+def _wl_cache_get(key: tuple) -> dict | None:
+    entry = _watchlist_cache.get(key)
+    if not entry:
+        return None
+    data, ts = entry
+    if time.time() - ts > _WL_CACHE_TTL:
+        _watchlist_cache.pop(key, None)
+        return None
+    return data
+
+
+def _wl_cache_set(key: tuple, data: dict) -> None:
+    _watchlist_cache[key] = (data, time.time())
+    if len(_watchlist_cache) > _WL_CACHE_MAX:
+        oldest_key = min(_watchlist_cache.items(), key=lambda kv: kv[1][1])[0]
+        _watchlist_cache.pop(oldest_key, None)
+
+
+def _wl_cache_age(key: tuple) -> int | None:
+    entry = _watchlist_cache.get(key)
+    if not entry:
+        return None
+    return int(time.time() - entry[1])
 
 
 # ══════════════════════════════════════════
@@ -241,22 +298,39 @@ async def _dispatch_analysis(chat_id: int, user_id: int, ticker: str, bot) -> No
         await _execute_analysis(chat_id, ticker, bot)
 
 
-async def watchlist_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """處理 /watchlist 指令：顯示自選股清單 + 即時報價（含總覽列、排序、52w 位置、量能）。"""
-    user_id = update.effective_user.id
-    tickers = await get_watchlist(user_id)
+def _wl_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🔄 強刷", callback_data="wl_refresh"),
+            InlineKeyboardButton("📊 批次快掃", callback_data="scanall"),
+            InlineKeyboardButton("📋 管理清單", callback_data="manage_wl"),
+        ]
+    ])
 
+
+async def _render_watchlist_view(user_id: int, force_refresh: bool = False) -> tuple[str, InlineKeyboardMarkup | None, bool]:
+    """組裝 /watchlist 顯示內容。回傳 (text, keyboard, used_cache)。"""
+    tickers = await get_watchlist(user_id)
     if not tickers:
-        await update.message.reply_text(
+        return (
             "📋 你的自選股清單是空的。\n\n"
             "使用 /watch AAPL 加入股票\n"
             "或 /report AAPL 直接分析"
-        )
-        return
+        ), None, False
 
-    loading = await update.message.reply_text("📋 正在載入自選股即時報價...")
-
-    prices = await fetch_fmp_batch_prices(tickers)
+    cache_key = (user_id, tuple(tickers))
+    used_cache = False
+    if not force_refresh:
+        cached = _wl_cache_get(cache_key)
+        if cached is not None:
+            prices = cached
+            used_cache = True
+        else:
+            prices = await fetch_fmp_batch_prices(tickers)
+            _wl_cache_set(cache_key, prices)
+    else:
+        prices = await fetch_fmp_batch_prices(tickers)
+        _wl_cache_set(cache_key, prices)
 
     # ── 整理資料 ──
     valid, invalid = [], []
@@ -270,6 +344,7 @@ async def watchlist_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 "chg_pct": q.get("change_pct") or 0,
                 "pos52": _pos_52w(q.get("price"), q.get("year_high"), q.get("year_low")),
                 "vol_ratio": _vol_ratio(q.get("volume"), q.get("avg_volume")),
+                "earn_days": _earnings_days(q.get("earnings_announcement")),
             })
         else:
             invalid.append(t)
@@ -287,6 +362,9 @@ async def watchlist_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if flats:
         summary += f" / ⚪{flats} 平"
     summary += f"  平均 {'+' if avg_pct >= 0 else ''}{avg_pct:.2f}%"
+    if used_cache:
+        age = _wl_cache_age(cache_key) or 0
+        summary += f"  ⚡{age}s 快取"
     lines = [summary]
 
     if valid:
@@ -298,6 +376,13 @@ async def watchlist_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             highlights.append(f"⚠️ 最弱 <b>{_esc(bot['ticker'])}</b> {bot['chg_pct']:.2f}%")
         if highlights:
             lines.append("  ".join(highlights))
+
+    # 即將公佈財報的個股
+    earn_alerts = [r for r in valid if r["earn_days"] is not None]
+    if earn_alerts:
+        earn_alerts.sort(key=lambda r: r["earn_days"])
+        bits = [f"<b>{_esc(r['ticker'])}</b>({r['earn_days']}天)" for r in earn_alerts[:5]]
+        lines.append(f"📅 財報臨近：{' · '.join(bits)}")
     lines.append("")
 
     # ── 各檔明細 ──
@@ -306,14 +391,13 @@ async def watchlist_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         sign = "+" if r["chg_pct"] >= 0 else ""
         tags = []
         if r["pos52"] is not None:
-            if r["pos52"] >= 95:
-                tags.append(f"📍52w {r['pos52']:.0f}% 🔝")
-            elif r["pos52"] <= 5:
-                tags.append(f"📍52w {r['pos52']:.0f}% 🔻")
-            else:
-                tags.append(f"📍52w {r['pos52']:.0f}%")
+            bar = _pos52_bar(r["pos52"])
+            marker = " 🔝" if r["pos52"] >= 95 else (" 🔻" if r["pos52"] <= 5 else "")
+            tags.append(f"📍{bar} {r['pos52']:.0f}%{marker}")
         if r["vol_ratio"] and r["vol_ratio"] >= 1.5:
             tags.append(f"🔥{r['vol_ratio']:.1f}x量")
+        if r["earn_days"] is not None:
+            tags.append(f"📅{r['earn_days']}天")
         tag_str = f"  {'  '.join(tags)}" if tags else ""
         lines.append(
             f"{arrow} <b>{_esc(r['ticker'])}</b>  ${r['price']:.2f}  "
@@ -325,19 +409,21 @@ async def watchlist_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         for t in invalid:
             lines.append(f"⚪ <b>{_esc(t)}</b>  報價載入失敗")
 
-    lines.append(f"\n/scan 批次快掃 (含 RSI / 技術評級)")
+    lines.append("\n/scan 批次快掃 (含 RSI / 技術評級)")
 
-    keyboard = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("📊 批次快掃", callback_data="scanall"),
-            InlineKeyboardButton("📋 管理清單", callback_data="manage_wl"),
-        ]
-    ])
+    return "\n".join(lines), _wl_keyboard(), used_cache
 
+
+async def watchlist_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """處理 /watchlist 指令：顯示自選股清單 + 即時報價（含 120s 結果快取、視覺化 52w、財報臨近）。"""
+    user_id = update.effective_user.id
+    loading = await update.message.reply_text("📋 正在載入自選股即時報價...")
+    text, keyboard, _ = await _render_watchlist_view(user_id, force_refresh=False)
     await loading.edit_text(
-        "\n".join(lines),
+        text,
         parse_mode=ParseMode.HTML,
         reply_markup=keyboard,
+        disable_web_page_preview=True,
     )
 
 
@@ -440,6 +526,7 @@ async def _run_scan(chat_id: int, user_id: int, bot) -> None:
             "rsi": rsi,
             "pos52": _pos_52w(q.get("price"), q.get("year_high"), q.get("year_low")),
             "vol_ratio": _vol_ratio(q.get("volume"), q.get("avg_volume")),
+            "earn_days": _earnings_days(q.get("earnings_announcement")),
         })
 
     valid = [r for r in rows if r["price"] is not None]
@@ -464,6 +551,8 @@ async def _run_scan(chat_id: int, user_id: int, bot) -> None:
                 out.append(f"近 52w 低 ({r['pos52']:.0f}%)")
         if r["vol_ratio"] and r["vol_ratio"] >= 2.0:
             out.append(f"量爆 {r['vol_ratio']:.1f}x")
+        if r["earn_days"] is not None:
+            out.append(f"📅 財報 {r['earn_days']} 天")
         return out
 
     alerted_ids = set()
@@ -494,7 +583,7 @@ async def _run_scan(chat_id: int, user_id: int, bot) -> None:
         sign = "+" if r["chg_pct"] >= 0 else ""
         bits = []
         if r["pos52"] is not None:
-            bits.append(f"52w:{r['pos52']:.0f}%")
+            bits.append(f"52w:{_pos52_bar(r['pos52'], 6)} {r['pos52']:.0f}%")
         if r["rsi"] is not None:
             bits.append(f"RSI:{r['rsi']:.0f}")
         if r["rec_zh"] and r["rec_zh"] != "N/A":
@@ -504,6 +593,8 @@ async def _run_scan(chat_id: int, user_id: int, bot) -> None:
             bits.append(cap)
         if r["vol_ratio"] and r["vol_ratio"] >= 1.5:
             bits.append(f"🔥{r['vol_ratio']:.1f}x")
+        if r["earn_days"] is not None:
+            bits.append(f"📅{r['earn_days']}天")
         head = f"{arrow} <b>{_esc(r['ticker'])}</b> ${r['price']:.2f} {sign}{r['chg_pct']:.2f}%"
         return head + ("\n  " + " | ".join(bits) if bits else "") + f"  ➜ /report {_esc(r['ticker'])}"
 
@@ -1018,6 +1109,19 @@ async def _inline_button_handler(update: Update, context: ContextTypes.DEFAULT_T
         await query.answer("🔍 開始批次快掃...")
         await _run_scan(chat_id, user_id, bot)
 
+    elif data == "wl_refresh":
+        await query.answer("🔄 強刷中...")
+        text, keyboard, _ = await _render_watchlist_view(user_id, force_refresh=True)
+        try:
+            await query.edit_message_text(
+                text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=keyboard,
+                disable_web_page_preview=True,
+            )
+        except Exception:
+            pass
+
     elif data == "manage_wl":
         tickers = await get_watchlist(user_id)
         if not tickers:
@@ -1065,14 +1169,8 @@ async def _inline_button_handler(update: Update, context: ContextTypes.DEFAULT_T
 
     elif data == "back_wl":
         await query.answer()
-        keyboard = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("📊 批次快掃", callback_data="scanall"),
-                InlineKeyboardButton("📋 管理清單", callback_data="manage_wl"),
-            ]
-        ])
         try:
-            await query.edit_message_reply_markup(reply_markup=keyboard)
+            await query.edit_message_reply_markup(reply_markup=_wl_keyboard())
         except Exception:
             pass
 

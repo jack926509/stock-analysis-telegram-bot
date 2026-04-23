@@ -74,13 +74,13 @@ async def plan_newsletter(market_data: dict) -> dict:
         user_prompt = f"""請根據以下今日市場數據，規劃美股日報內容。
 
 [Market Data]
-{json.dumps(market_data, ensure_ascii=False, indent=2)}
+{json.dumps(market_data, ensure_ascii=False, separators=(",", ":"))}
 
 請以 JSON 格式回傳規劃結果："""
 
         response = await client.messages.create(
-            model=Config.ANTHROPIC_MODEL,
-            max_tokens=2000,
+            model=Config.ANTHROPIC_PLANNER_MODEL,
+            max_tokens=1200,
             system=cached_system(PLANNER_SYSTEM),
             messages=[
                 {"role": "user", "content": user_prompt},

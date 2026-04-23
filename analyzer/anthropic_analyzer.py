@@ -11,6 +11,31 @@ from config import Config
 from utils.ai_client import cached_system, get_ai_client
 
 
+# 對「分析」零貢獻、純背景描述／識別碼欄位 — 進入 AI 前先剔除以省 input tokens。
+# 這些欄位仍保留在原 dict 中供 formatter 顯示給使用者，只是不送進 AI context。
+_AI_NOISE_KEYS: frozenset[str] = frozenset({
+    "business_summary", "long_business_summary", "longBusinessSummary",
+    "description", "summary",
+    "logo_url", "logo", "image", "website", "address", "address1",
+    "phone", "fax", "ipo", "ipoDate", "cusip", "isin", "cik",
+    "fullTimeEmployees", "country", "city", "state", "zip",
+})
+
+
+def _strip_noise(data):
+    """遞迴移除 _AI_NOISE_KEYS — 只用於 AI context 組裝。"""
+    if isinstance(data, dict):
+        return {k: _strip_noise(v) for k, v in data.items() if k not in _AI_NOISE_KEYS}
+    if isinstance(data, list):
+        return [_strip_noise(v) for v in data]
+    return data
+
+
+def _compact(data) -> str:
+    """JSON compact 序列化（無 indent / 無多餘空白）— 顯著降低 input tokens。"""
+    return json.dumps(_strip_noise(data), ensure_ascii=False, separators=(",", ":"))
+
+
 # ──────────────────────────────────────────────
 # 反幻覺核心：System Prompt（三角色優化版）
 # ──────────────────────────────────────────────
@@ -99,65 +124,65 @@ def _build_context(
     """
     context_parts = [
         "=== 即時股價數據 (來源: Finnhub) ===",
-        json.dumps(finnhub_data, ensure_ascii=False, indent=2),
+        _compact(finnhub_data),
         "",
         "=== 基本面數據 (來源: yfinance) ===",
-        json.dumps(yfinance_data, ensure_ascii=False, indent=2),
+        _compact(yfinance_data),
         "",
         "=== 最新新聞 (來源: Tavily) ===",
-        json.dumps(tavily_data, ensure_ascii=False, indent=2),
+        _compact(tavily_data),
         "",
         "=== 技術指標 (來源: TradingView) ===",
-        json.dumps(tradingview_data, ensure_ascii=False, indent=2),
+        _compact(tradingview_data),
     ]
 
     if history_data and "error" not in history_data:
         context_parts.extend([
             "",
             "=== 歷史回測數據 (來源: yfinance 歷史) ===",
-            json.dumps(history_data, ensure_ascii=False, indent=2),
+            _compact(history_data),
         ])
 
     if peer_data and "error" not in peer_data:
         context_parts.extend([
             "",
             "=== 同業比較數據 (來源: yfinance 同業) ===",
-            json.dumps(peer_data, ensure_ascii=False, indent=2),
+            _compact(peer_data),
         ])
 
     if analyst_data and "error" not in analyst_data:
         context_parts.extend([
             "",
             "=== 分析師評級與目標價 (來源: Finnhub) ===",
-            json.dumps(analyst_data, ensure_ascii=False, indent=2),
+            _compact(analyst_data),
         ])
 
     if insider_data and "error" not in insider_data:
         context_parts.extend([
             "",
             "=== 內部人交易紀錄 (來源: Finnhub) ===",
-            json.dumps(insider_data, ensure_ascii=False, indent=2),
+            _compact(insider_data),
         ])
 
     if earnings_data and "error" not in earnings_data:
         context_parts.extend([
             "",
             "=== 歷史 EPS 驚喜 (來源: Finnhub) ===",
-            json.dumps(earnings_data, ensure_ascii=False, indent=2),
+            _compact(earnings_data),
         ])
 
     if macro_data and "error" not in macro_data:
         context_parts.extend([
             "",
             "=== 宏觀環境指標 (VIX / 10Y殖利率) ===",
-            json.dumps(macro_data, ensure_ascii=False, indent=2),
+            _compact(macro_data),
         ])
 
     if signals_data:
         context_parts.extend([
             "",
             "=== 量化信號共識 (Quantitative Signals Engine) ===",
-            json.dumps(signals_data, ensure_ascii=False, indent=2),
+            _compact(signals_data),
         ])
 
     return "\n".join(context_parts)
@@ -205,7 +230,7 @@ async def analyze_stock(
 
         response = await client.messages.create(
             model=Config.ANTHROPIC_MODEL,
-            max_tokens=4000,
+            max_tokens=2800,
             system=cached_system(SYSTEM_PROMPT),
             messages=[
                 {"role": "user", "content": user_prompt},

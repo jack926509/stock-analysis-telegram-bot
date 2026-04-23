@@ -34,6 +34,8 @@ class Config:
     # ── Anthropic ──
     ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
     ANTHROPIC_MODEL: str = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6")
+    # Newsletter planner 用較便宜的 Haiku（純 JSON 結構規劃，不需 Sonnet）
+    ANTHROPIC_PLANNER_MODEL: str = os.getenv("ANTHROPIC_PLANNER_MODEL", "claude-haiku-4-5-20251001")
 
     # ── 健康檢查 ──
     HEALTH_PORT: int = int(os.getenv("HEALTH_PORT", "8080"))

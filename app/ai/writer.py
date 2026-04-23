@@ -72,16 +72,16 @@ async def write_newsletter(plan: dict, market_data: dict) -> str:
         user_prompt = f"""請根據以下規劃與市場數據，撰寫今日美股日報。
 
 [Newsletter Plan]
-{json.dumps(plan, ensure_ascii=False, indent=2)}
+{json.dumps(plan, ensure_ascii=False, separators=(",", ":"))}
 
 [Market Data]
-{json.dumps(market_data, ensure_ascii=False, indent=2)}
+{json.dumps(market_data, ensure_ascii=False, separators=(",", ":"))}
 
 請撰寫完整日報："""
 
         response = await client.messages.create(
             model=Config.ANTHROPIC_MODEL,
-            max_tokens=3000,
+            max_tokens=2200,
             system=cached_system(WRITER_SYSTEM),
             messages=[
                 {"role": "user", "content": user_prompt},
