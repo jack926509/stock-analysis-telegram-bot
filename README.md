@@ -20,6 +20,7 @@
 - 🧠 **深度分析** — 基本面、技術面、量能、籌碼面、歷史回測、同業比較、市場情緒七維度交叉驗證
 - 📋 **自選股清單** — 個人化追蹤清單，快速查閱常用標的
 - 🔒 **ETF 支援** — 支援 SPY、QQQ 等 ETF 分析
+- 📈 **K 線圖** — 自動生成 60 日 K 線圖（MA5/MA20/MA60）以圖片發送
 - 🏥 **健康監控** — HTTP `/health` 端點，支援 Zeabur 服務監控
 
 ---
@@ -70,6 +71,9 @@ stock_bot_project/
 │   └── telegram_bot.py        #   Bot 指令處理
 └── utils/                     # 🔧 工具模組
     ├── formatter.py           #   報告格式化
+    ├── chart.py               #   K 線圖生成 (mplfinance)
+    ├── cache.py               #   分層 LRU 快取
+    ├── retry.py               #   API 指數退避重試
     ├── database.py            #   SQLite 資料庫（自選股 + 查詢歷史）
     ├── rate_limiter.py        #   Per-user 請求限制
     └── health.py              #   HTTP 健康檢查端點
@@ -172,6 +176,7 @@ HEALTH_ENABLED=true             # 啟用 /health 端點
 | **yfinance** | 基本面 + 歷史數據 + 同業比較 |
 | **Tavily** | 新聞搜尋 API |
 | **TradingView-TA** | 技術指標分析 |
+| **mplfinance** | K 線圖生成 |
 | **SQLite** | 自選股 + 查詢歷史 |
 | **aiohttp** | 健康檢查 HTTP 端點 |
 | **asyncio** | 非同步並行處理 |
@@ -185,7 +190,8 @@ HEALTH_ENABLED=true             # 啟用 /health 端點
 | 原始數據同步展示 | 反幻覺最後防線，使用者可交叉驗證 |
 | 模組化架構 | 數據源獨立，可輕鬆替換或擴展 |
 | Singleton 客戶端 | 避免重複建立 API 連線 |
-| 5 分鐘快取 | 防止短時間重複查詢浪費 API 額度 |
+| 分層 LRU 快取 | Raw 數據 30 分鐘 + 報告 5 分鐘，LRU 淘汰防止記憶體膨脹 |
+| API 指數退避重試 | 自動重試 1 次 + 2s 等待，提升數據源穩定性 |
 | Per-user Rate Limiting | 防止單一使用者濫用（每分鐘 5 次） |
 | SQLite WAL 模式 | 高併發讀寫效能 |
 | Webhook 模式選項 | 降低 Zeabur 資源消耗 |
@@ -205,6 +211,36 @@ HEALTH_ENABLED=true             # 啟用 /health 端點
 ---
 
 ## 📝 修改歷程 (Changelog)
+
+### v4.0 — 五大優化升級 (2026-04-23)
+
+#### 📈 K 線圖生成
+- **mplfinance 整合**：自動生成 60 日 K 線圖，含 MA5/MA20/MA60 均線
+- **暗色主題**：nightclouds 風格，漲跌分色（綠漲紅跌），搭配成交量柱
+- **圖片發送**：在分析報告前以圖片方式傳送，直觀展示走勢
+
+#### 🔄 API 指數退避重試
+- **新增 `utils/retry.py`**：`retry_async_call()` 通用重試函數
+- **所有 Fetcher 整合**：Finnhub、yfinance、Tavily、TradingView、歷史回測、同業比較全部啟用
+- **策略**：失敗後等待 2s 重試 1 次（指數退避），大幅提升數據抓取成功率
+
+#### 📅 財報日曆提醒
+- **earningsDate 提取**：從 yfinance 取得下次財報發布日期
+- **倒數天數顯示**：報告中顯示「距離財報 X 天」，7 天內加 ⚠️ 提醒
+- **自動解析**：支援 earningsTimestamp（Unix）與 earningsDate（Timestamp list）兩種格式
+
+#### 🎮 InlineKeyboard 互動
+- **報告附帶互動按鈕**：每份報告底部顯示「加入自選股」與「重新分析」按鈕
+- **一鍵加入自選**：點擊即加入自選股清單，免輸入指令
+- **一鍵刷新**：點擊即重新抓取數據並生成最新分析
+- **CallbackQueryHandler**：新增回調處理器，含 Rate Limit 保護
+
+#### 🗃️ 分層快取 + LRU 上限
+- **新增 `utils/cache.py`**：基於 OrderedDict 的 LRU Cache
+- **Raw 數據快取**：TTL 30 分鐘，最多 100 條，避免重複 API 呼叫
+- **報告快取**：TTL 5 分鐘，最多 50 條，確保即時性
+- **LRU 淘汰**：超過上限自動淘汰最久未使用的項目
+- **取代舊快取**：移除 `_report_cache` 字典，統一使用分層快取
 
 ### v3.0 — 全面功能擴展 (2026-03-13)
 
@@ -270,18 +306,16 @@ HEALTH_ENABLED=true             # 啟用 /health 端點
 ## 🔮 未來優化方向
 
 ### 分析師面
-- [ ] **財報日曆**：標示下一次財報發布日期，提醒投資人注意
 - [ ] **選擇權資料**：整合 Put/Call Ratio、隱含波動率 (IV) 等衍生品數據
 - [ ] **多時間框架技術分析**：日線 + 週線 + 月線綜合判斷
 - [ ] **產業輪動分析**：判斷資金流向哪些產業
 - [ ] **相關性分析**：與大盤指數（SPY）的 Beta 和相關係數
 
 ### 前端面
-- [ ] **圖表生成**：使用 matplotlib/plotly 生成 K 線圖，以圖片發送
-- [ ] **互動按鈕**：InlineKeyboard 讓使用者選擇分析深度（快速/標準/深度）
 - [ ] **定時推送**：設定每日盤前/盤後自動推送追蹤個股報告
 - [ ] **多語言支援**：英文/簡體中文版本切換
 - [ ] **分析歷史查詢**：`/history` 查看過往分析記錄
+- [ ] **深度分析模式**：InlineKeyboard 選擇快速/標準/深度三種分析層級
 
 ### 後端面
 - [ ] **Redis 快取**：替換記憶體快取為 Redis，支援多實例水平擴展
@@ -289,7 +323,6 @@ HEALTH_ENABLED=true             # 啟用 /health 端點
 - [ ] **Docker 化**：提供 Dockerfile 與 docker-compose.yml
 - [ ] **CI/CD**：GitHub Actions 自動化測試與部署
 - [ ] **單元測試**：為每個 fetcher 和 formatter 寫測試
-- [ ] **API 重試機制**：指數退避重試失敗的 API 呼叫
 
 ---
 

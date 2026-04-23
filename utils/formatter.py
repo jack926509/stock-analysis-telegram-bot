@@ -66,6 +66,26 @@ def _adx_label(adx) -> str:
         return ""
 
 
+def _earnings_countdown(date_str: str) -> str:
+    """計算距離財報日的天數提示。"""
+    try:
+        from datetime import date
+        ed = date.fromisoformat(date_str)
+        today = date.today()
+        days = (ed - today).days
+        if days < 0:
+            return ""
+        if days == 0:
+            return " (今天!)"
+        if days <= 7:
+            return f" (剩 {days} 天 ⚠️)"
+        if days <= 30:
+            return f" (剩 {days} 天)"
+        return f" (剩 {days} 天)"
+    except (ValueError, TypeError):
+        return ""
+
+
 def _price_position_bar(current, low_52w, high_52w) -> str:
     """生成 52 週價格位置視覺化長條。"""
     try:
@@ -438,6 +458,12 @@ def format_report(
         earn_growth = yfinance_data.get("earnings_growth", "N/A")
         if rev_growth != "N/A" or earn_growth != "N/A":
             report_parts.append(f"  營收成長: {rev_growth}  盈餘成長: {earn_growth}")
+
+        # 財報日期
+        earnings_date = yfinance_data.get("earnings_date", "N/A")
+        if earnings_date != "N/A":
+            _ed_hint = _earnings_countdown(earnings_date)
+            report_parts.append(f"  📅 下次財報: {earnings_date}{_ed_hint}")
 
         # 籌碼面
         short_ratio = yfinance_data.get("short_ratio", "N/A")

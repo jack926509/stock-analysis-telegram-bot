@@ -8,6 +8,8 @@ import asyncio
 
 import yfinance as yf
 
+from utils.retry import retry_async_call
+
 
 def _safe_get(info: dict, key: str, fallback="N/A"):
     """安全取值，None 或缺失一律回傳 fallback。"""
@@ -61,6 +63,27 @@ def _format_percentage(value) -> str:
         return "N/A"
 
 
+def _extract_earnings_date(info: dict) -> str:
+    """從 yfinance info 提取下次財報日期。"""
+    try:
+        # earningsTimestamp (Unix) or earningsDate (list of Timestamps)
+        ts = info.get("earningsTimestamp")
+        if ts:
+            from datetime import datetime, timezone
+            dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+            return dt.strftime("%Y-%m-%d")
+
+        dates = info.get("earningsDate")
+        if dates and len(dates) > 0:
+            d = dates[0]
+            if hasattr(d, "strftime"):
+                return d.strftime("%Y-%m-%d")
+            return str(d)[:10]
+    except Exception:
+        pass
+    return "N/A"
+
+
 async def fetch_yfinance_fundamentals(ticker: str) -> dict:
     """
     非同步抓取 yfinance 基本面數據。
@@ -73,7 +96,10 @@ async def fetch_yfinance_fundamentals(ticker: str) -> dict:
     """
     try:
         stock = yf.Ticker(ticker.upper())
-        info = await asyncio.to_thread(lambda: stock.info)
+        info = await retry_async_call(
+            asyncio.to_thread, lambda: stock.info,
+            source_name="yfinance",
+        )
 
         if not info or info.get("regularMarketPrice") is None:
             # 嘗試檢查是否有任何有效數據
@@ -127,6 +153,8 @@ async def fetch_yfinance_fundamentals(ticker: str) -> dict:
             "held_pct_institutions": _format_percentage(info.get("heldPercentInstitutions")),
             # 營收
             "revenue": _format_large_number(info.get("totalRevenue")),
+            # 財報日期
+            "earnings_date": _extract_earnings_date(info),
             # 公司簡介
             "business_summary": (
                 info.get("longBusinessSummary", "N/A")[:300] + "..."

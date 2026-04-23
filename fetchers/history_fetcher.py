@@ -10,6 +10,8 @@ from datetime import datetime, timedelta
 import yfinance as yf
 import numpy as np
 
+from utils.retry import retry_async_call
+
 
 async def fetch_history_analysis(ticker: str) -> dict:
     """
@@ -22,8 +24,10 @@ async def fetch_history_analysis(ticker: str) -> dict:
         stock = yf.Ticker(ticker.upper())
 
         # 取 200 天歷史數據（足夠計算 90 天報酬 + 均線）
-        hist = await asyncio.to_thread(
-            lambda: stock.history(period="1y", interval="1d")
+        hist = await retry_async_call(
+            asyncio.to_thread,
+            lambda: stock.history(period="1y", interval="1d"),
+            source_name="yfinance_history",
         )
 
         if hist is None or hist.empty or len(hist) < 10:
