@@ -368,6 +368,158 @@ def _format_peer_section(peer_data: dict, yfinance_data: dict) -> list[str]:
     return lines
 
 
+def _format_signals_section(signals_data: dict) -> list[str]:
+    """格式化量化信號共識區塊。"""
+    if not signals_data:
+        return []
+
+    lines = []
+    lines.append("")
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append("🧮 *量化信號共識*")
+
+    consensus = signals_data.get("consensus", "N/A")
+    score = signals_data.get("weighted_score", 0)
+    confidence = signals_data.get("confidence", 0)
+    bullish = signals_data.get("bullish_count", 0)
+    bearish = signals_data.get("bearish_count", 0)
+    neutral_cnt = signals_data.get("neutral_count", 0)
+
+    emoji = {"BULLISH": "🟢", "BEARISH": "🔴", "NEUTRAL": "🟡"}.get(consensus, "⚪")
+    lines.append(f"  {emoji} 共識: {consensus}  分數: {score:+.3f}  信心: {confidence}%")
+    lines.append(f"  多: {bullish}  空: {bearish}  中性: {neutral_cnt}")
+
+    signals = signals_data.get("signals", [])
+    if signals:
+        for s in signals:
+            sig_emoji = {"bullish": "🟢", "bearish": "🔴"}.get(s.get("signal"), "🟡")
+            lines.append(f"  {sig_emoji} {s['name']}: {s['reason']}")
+
+    return lines
+
+
+def _format_analyst_section(analyst_data: dict) -> list[str]:
+    """格式化分析師評級區塊。"""
+    if not analyst_data or "error" in analyst_data:
+        return []
+
+    lines = []
+    lines.append("")
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append("🏦 *分析師評級*")
+
+    consensus = analyst_data.get("consensus", "N/A")
+    total = analyst_data.get("total_analysts", 0)
+    if consensus != "N/A" and total > 0:
+        emoji = {"strongBuy": "🟢", "buy": "🟢", "hold": "🟡", "sell": "🔴", "strongSell": "🔴"}.get(consensus, "⚪")
+        lines.append(f"  {emoji} 共識: {consensus} ({total} 位分析師)")
+        sb = analyst_data.get("strong_buy", 0)
+        b = analyst_data.get("buy", 0)
+        h = analyst_data.get("hold", 0)
+        s = analyst_data.get("sell", 0)
+        ss = analyst_data.get("strong_sell", 0)
+        lines.append(f"  強買:{sb} 買:{b} 持有:{h} 賣:{s} 強賣:{ss}")
+
+    th = analyst_data.get("target_high", "N/A")
+    tl = analyst_data.get("target_low", "N/A")
+    tm = analyst_data.get("target_mean", "N/A")
+    tmed = analyst_data.get("target_median", "N/A")
+    if tm != "N/A":
+        lines.append(f"  目標價: ${_format_number(tmed)} (均值${_format_number(tm)})")
+        lines.append(f"  範圍: ${_format_number(tl)} ~ ${_format_number(th)}")
+
+    return lines
+
+
+def _format_insider_section(insider_data: dict) -> list[str]:
+    """格式化內部人交易區塊。"""
+    if not insider_data or "error" in insider_data:
+        return []
+
+    lines = []
+    lines.append("")
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append("👔 *內部人交易（近90天）*")
+
+    total = insider_data.get("total_transactions", 0)
+    if total == 0:
+        lines.append("  無內部人交易紀錄")
+        return lines
+
+    sentiment = insider_data.get("net_sentiment", "neutral")
+    emoji = {"bullish": "🟢", "bearish": "🔴"}.get(sentiment, "🟡")
+    buy_c = insider_data.get("buy_count", 0)
+    sell_c = insider_data.get("sell_count", 0)
+    lines.append(f"  {emoji} 動向: {sentiment}  買入:{buy_c} 賣出:{sell_c}")
+
+    buy_v = insider_data.get("buy_value", 0)
+    sell_v = insider_data.get("sell_value", 0)
+    if buy_v > 0 or sell_v > 0:
+        lines.append(f"  買入金額: ${_format_number(buy_v, 0)}  賣出金額: ${_format_number(sell_v, 0)}")
+
+    notable = insider_data.get("notable_transactions", [])
+    for tx in notable[:3]:
+        lines.append(f"  {tx['type']} {tx['name']}: ${_format_number(tx['value_usd'], 0)} ({tx['date']})")
+
+    return lines
+
+
+def _format_earnings_section(earnings_data: dict) -> list[str]:
+    """格式化 EPS 驚喜區塊。"""
+    if not earnings_data or "error" in earnings_data:
+        return []
+
+    lines = []
+    lines.append("")
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append("📋 *EPS 驚喜紀錄*")
+
+    track = earnings_data.get("track_record", "N/A")
+    beat = earnings_data.get("beat_count", 0)
+    miss = earnings_data.get("miss_count", 0)
+    total = earnings_data.get("total_quarters", 0)
+    track_emoji = {"excellent": "🟢", "good": "🟢", "poor": "🔴", "mixed": "🟡"}.get(track, "⚪")
+    lines.append(f"  {track_emoji} 紀錄: {track} (Beat:{beat} Miss:{miss}/{total}季)")
+
+    quarters = earnings_data.get("quarters", [])
+    for q in quarters:
+        surprise = q.get("surprise_pct", "N/A")
+        if surprise != "N/A":
+            s_emoji = "🟢" if surprise > 0 else "🔴"
+            lines.append(f"  {q['period']}: 實際${q['actual']} vs 預估${q['estimate']} ({s_emoji}{surprise:+.1f}%)")
+
+    return lines
+
+
+def _format_macro_section(macro_data: dict) -> list[str]:
+    """格式化宏觀環境區塊。"""
+    if not macro_data or "error" in macro_data:
+        return []
+
+    lines = []
+    lines.append("")
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append("🌍 *宏觀環境*")
+
+    vix = macro_data.get("vix", "N/A")
+    vix_level = macro_data.get("vix_level", "N/A")
+    if vix != "N/A":
+        lines.append(f"  VIX 恐慌指數: {vix} ({vix_level})")
+
+    us10y = macro_data.get("us10y", "N/A")
+    yield_level = macro_data.get("yield_level", "N/A")
+    if us10y != "N/A":
+        lines.append(f"  10Y 殖利率: {us10y}% ({yield_level})")
+
+    risk_label = macro_data.get("risk_label", "N/A")
+    risk_env = macro_data.get("risk_environment", "N/A")
+    if risk_env != "N/A":
+        risk_emoji = {"risk_on": "🟢", "risk_off": "🔴"}.get(risk_env, "🟡")
+        lines.append(f"  {risk_emoji} {risk_label}")
+
+    return lines
+
+
 def format_report(
     ticker: str,
     finnhub_data: dict,
@@ -377,9 +529,14 @@ def format_report(
     ai_analysis: str,
     history_data: dict | None = None,
     peer_data: dict | None = None,
+    signals_data: dict | None = None,
+    analyst_data: dict | None = None,
+    insider_data: dict | None = None,
+    earnings_data: dict | None = None,
+    macro_data: dict | None = None,
 ) -> str:
     """
-    組裝完整的分析報告（三角色優化版 v3）。
+    組裝完整的分析報告（v4 — ai-hedge-fund 增強版）。
     """
     report_parts = []
 
@@ -593,6 +750,26 @@ def format_report(
     if peer_data:
         report_parts.extend(_format_peer_section(peer_data, yfinance_data))
 
+    # ══ 分析師評級 ══
+    if analyst_data:
+        report_parts.extend(_format_analyst_section(analyst_data))
+
+    # ══ 內部人交易 ══
+    if insider_data:
+        report_parts.extend(_format_insider_section(insider_data))
+
+    # ══ EPS 驚喜 ══
+    if earnings_data:
+        report_parts.extend(_format_earnings_section(earnings_data))
+
+    # ══ 宏觀環境 ══
+    if macro_data:
+        report_parts.extend(_format_macro_section(macro_data))
+
+    # ══ 量化信號 ══
+    if signals_data:
+        report_parts.extend(_format_signals_section(signals_data))
+
     # ══ 新聞 ══
     report_parts.append("")
     report_parts.append("━━━━━━━━━━━━━━━━━━━━━━━━━━")
@@ -629,7 +806,7 @@ def format_report(
     report_parts.append("")
     report_parts.append("══════════════════════════")
     report_parts.append("⚠️ 本報告僅供參考研究，不構成投資建議。")
-    report_parts.append(f"數據來源: Finnhub | yfinance | Tavily | TradingView")
+    report_parts.append(f"數據來源: Finnhub | yfinance | Tavily | TradingView | Signals Engine")
     report_parts.append(f"📅 {now} | 🛡️ Zero-Hallucination Engine")
 
     return "\n".join(report_parts)
