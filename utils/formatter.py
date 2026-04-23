@@ -595,6 +595,6 @@ def format_report(
     L.append("")
     L.append(DIV_BOLD)
     L.append("⚠️ 僅供參考研究，不構成投資建議。")
-    L.append(f"📅 {now} | 🛡️ Zero-Hallucination Engine v5.0")
+    L.append(f"📅 {now} | 📊 Stock Analysis Engine v5.0")
 
     return "\n".join(L)

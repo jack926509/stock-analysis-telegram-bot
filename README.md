@@ -1,11 +1,11 @@
 <div align="center">
 
-# 🛡️ 零幻覺美股 Telegram 分析機器人
+# 📊 美股 Telegram 分析機器人
 
-**Zero-Hallucination US Stock Analysis Telegram Bot**
+**US Stock Analysis Telegram Bot**
 
 基於 RAG + 12 維度量化信號引擎 + Anthropic Claude 四觀點分析  
-所有論點皆需真實數據佐證，嚴格排除 AI 幻覺
+所有論點皆需真實數據佐證，原始數據與 AI 分析同步展示供交叉驗證
 
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![Telegram Bot](https://img.shields.io/badge/Telegram-Bot-26A5E4?logo=telegram&logoColor=white)](https://core.telegram.org/bots)

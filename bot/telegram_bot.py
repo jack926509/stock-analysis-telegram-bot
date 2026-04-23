@@ -84,7 +84,7 @@ def _validate_ticker(ticker: str) -> bool:
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """處理 /start 指令"""
     welcome_msg = (
-        "👋 歡迎使用零幻覺美股分析 Bot!\n"
+        "👋 歡迎使用美股分析 Bot!\n"
         "\n"
         "📌 指令：\n"
         "  /report AAPL — 完整深度分析報告\n"
@@ -100,7 +100,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "🏦 分析師·內部人·EPS 驚喜\n"
         "🌍 VIX·殖利率 宏觀環境\n"
         "🤖 Claude 四觀點深度分析\n"
-        "🛡️ 所有分析僅基於真實數據，零幻覺"
+        "📊 所有分析皆基於真實數據，原始數據與 AI 分析同步展示"
     )
     await update.message.reply_text(welcome_msg)
 

@@ -1,5 +1,5 @@
 """
-零幻覺美股 Telegram 分析機器人
+美股 Telegram 分析機器人
 程式進入點
 
 啟動方式：python main.py
@@ -110,7 +110,7 @@ def main():
     logger.info("✅ 環境變數驗證通過")
 
     # 啟動 Bot
-    logger.info("🚀 正在啟動零幻覺美股分析 Bot...")
+    logger.info("🚀 正在啟動美股分析 Bot...")
     logger.info(f"📦 AI 模型: {Config.ANTHROPIC_MODEL}")
     logger.info(f"🌍 環境: {Config.ENV}")
     logger.info(f"📡 模式: {Config.BOT_MODE}")
