@@ -25,6 +25,9 @@ class Config:
     # ── Finnhub ──
     FINNHUB_API_KEY: str = os.getenv("FINNHUB_API_KEY", "")
 
+    # ── FMP (Financial Modeling Prep) ──
+    FMP_API_KEY: str = os.getenv("FMP_API_KEY", "")
+
     # ── Tavily ──
     TAVILY_API_KEY: str = os.getenv("TAVILY_API_KEY", "")
 
