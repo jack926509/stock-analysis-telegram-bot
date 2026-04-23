@@ -48,8 +48,8 @@ logger = logging.getLogger(__name__)
 _analysis_semaphore = asyncio.Semaphore(3)
 
 # ── 超時設定（秒）──
-FETCH_TIMEOUT = 30
-EXTENDED_FETCH_TIMEOUT = 45  # 含歷史 + 同業
+FETCH_TIMEOUT = 45
+EXTENDED_FETCH_TIMEOUT = 60  # yfinance 重試最多 21s + 其他數據源
 AI_TIMEOUT = 90
 
 # ── ETF 支援：允許數字的 ticker 驗證 ──
