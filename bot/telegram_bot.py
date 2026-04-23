@@ -447,8 +447,6 @@ def _split_message(text: str, max_length: int = 4096) -> list[str]:
 async def _inline_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """處理 InlineKeyboard 按鈕回調。"""
     query = update.callback_query
-    await query.answer()
-
     data = query.data or ""
     user_id = query.from_user.id
 
@@ -456,35 +454,42 @@ async def _inline_button_handler(update: Update, context: ContextTypes.DEFAULT_T
         ticker = data.split(":", 1)[1]
         added = await add_to_watchlist(user_id, ticker)
         if added:
-            await query.edit_message_reply_markup(reply_markup=None)
-            await query.message.reply_text(f"⭐ 已將 {ticker} 加入自選股清單")
+            await query.answer(f"✅ {ticker} 已加入自選股")
+            # 更新按鈕：移除「加入自選股」，保留「重新分析」
+            new_keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔄 重新分析", callback_data=f"refresh:{ticker}")],
+            ])
+            try:
+                await query.edit_message_reply_markup(reply_markup=new_keyboard)
+            except Exception:
+                pass
         else:
-            await query.answer(f"{ticker} 已在自選股清單中", show_alert=True)
+            await query.answer(f"ℹ️ {ticker} 已在自選股清單中", show_alert=True)
 
     elif data.startswith("refresh:"):
         ticker = data.split(":", 1)[1]
         if not rate_limiter.is_allowed(user_id):
             wait = rate_limiter.retry_after(user_id)
-            await query.answer(f"請 {wait} 秒後再試", show_alert=True)
+            await query.answer(f"⏰ 請 {wait} 秒後再試", show_alert=True)
             return
+        await query.answer(f"🔄 正在重新分析 {ticker}...")
         try:
             await record_query(user_id, ticker)
         except Exception:
             pass
-        await query.edit_message_reply_markup(reply_markup=None)
-        msg = await query.message.reply_text(f"🔄 正在重新分析 {ticker}...")
         try:
-            await msg.delete()
+            await query.edit_message_reply_markup(reply_markup=None)
         except Exception:
             pass
-        # 模擬一個 update.message 來複用分析流程
-        context.args = [ticker]
-        fake_update = Update(
-            update_id=update.update_id,
-            message=query.message,
-        )
+        report_cache.invalidate(ticker)
+        raw_cache.invalidate(f"{ticker}:base")
+        # callback_query 的 update.message 為 None，需用 query.message 作為回覆目標
+        fake_update = Update(update_id=update.update_id, message=query.message)
         async with _analysis_semaphore:
             await _execute_analysis(fake_update, ticker)
+
+    else:
+        await query.answer()
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
