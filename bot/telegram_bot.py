@@ -25,10 +25,15 @@ from fetchers.tavily_fetcher import fetch_tavily_news
 from fetchers.tradingview_fetcher import fetch_tradingview_analysis
 from fetchers.history_fetcher import fetch_history_analysis
 from fetchers.peer_fetcher import fetch_peer_comparison
+from fetchers.analyst_fetcher import fetch_analyst_data
+from fetchers.insider_fetcher import fetch_insider_transactions
+from fetchers.earnings_surprise_fetcher import fetch_earnings_surprises
+from fetchers.macro_fetcher import fetch_macro_data
 from analyzer.anthropic_analyzer import analyze_stock
 from utils.formatter import format_report
 from utils.cache import raw_cache, report_cache
 from utils.chart import generate_chart
+from utils.signals import compute_signals
 from utils.rate_limiter import rate_limiter
 from utils.database import (
     add_to_watchlist,
@@ -67,22 +72,16 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     welcome_msg = (
         "👋 歡迎使用零幻覺美股分析 Bot!\n"
         "\n"
-        "我會基於真實數據為你分析美股，嚴格排除 AI 幻覺。\n"
+        "📌 指令：\n"
+        "  /report AAPL  — 完整分析報告\n"
+        "  /watchlist — 自選股清單\n"
+        "  /watch AAPL — 加入 / /unwatch 移除\n"
         "\n"
-        "📌 分析指令：\n"
-        "  /report AAPL — 分析 Apple\n"
-        "  /report TSLA — 分析 Tesla\n"
-        "  /report SPY  — 分析 ETF\n"
-        "\n"
-        "📋 自選股指令：\n"
-        "  /watchlist       — 查看自選股清單\n"
-        "  /watch AAPL      — 加入自選股\n"
-        "  /unwatch AAPL    — 移除自選股\n"
-        "\n"
-        "🔍 數據來源：\n"
-        "  Finnhub | yfinance | Tavily | TradingView\n"
-        "\n"
-        "🤖 分析引擎：Anthropic Claude\n"
+        "🔍 10+ 數據源並行抓取\n"
+        "🧮 8 維度量化信號引擎\n"
+        "🏦 分析師·內部人·EPS 驚喜\n"
+        "🌍 VIX·殖利率 宏觀環境\n"
+        "🤖 Claude 四觀點深度分析\n"
         "🛡️ 所有分析僅基於真實數據，零幻覺"
     )
     await update.message.reply_text(welcome_msg)
@@ -224,7 +223,7 @@ async def _execute_analysis(update: Update, ticker: str) -> None:
     """執行完整分析流程（被 semaphore 控制並發）。"""
 
     loading_msg = await update.message.reply_text(
-        f"⏳ 正在分析 {ticker}...\n📡 並行抓取 6 個數據源中..."
+        f"⏳ 正在分析 {ticker}...\n📡 並行抓取 10+ 數據源中..."
     )
 
     try:
@@ -250,18 +249,30 @@ async def _execute_analysis(update: Update, ticker: str) -> None:
             raw_cache.set(f"{ticker}:base", (finnhub_data, yfinance_data, tradingview_data))
             logger.info(f"[{ticker}] 基礎數據抓取完成")
 
-        # ── Step 1.5: 並行抓取擴展數據（Tavily + 歷史 + 同業）──
+        # ── Step 1.5: 並行抓取擴展數據（Tavily + 歷史 + 同業 + 分析師 + 內部人 + EPS + 宏觀）──
         company_name = yfinance_data.get("company_name", "")
         sector = yfinance_data.get("sector", "")
         industry = yfinance_data.get("industry", "")
 
         extended_tasks = [fetch_tavily_news(ticker, company_name)]
+        task_labels = ["Tavily"]
 
         if Config.HISTORY_ENABLED:
             extended_tasks.append(fetch_history_analysis(ticker))
+            task_labels.append("History")
 
         if Config.PEER_COMPARISON_ENABLED and sector and sector != "N/A":
             extended_tasks.append(fetch_peer_comparison(ticker, sector, industry))
+            task_labels.append("Peer")
+
+        extended_tasks.append(fetch_analyst_data(ticker))
+        task_labels.append("Analyst")
+        extended_tasks.append(fetch_insider_transactions(ticker))
+        task_labels.append("Insider")
+        extended_tasks.append(fetch_earnings_surprises(ticker))
+        task_labels.append("Earnings")
+        extended_tasks.append(fetch_macro_data())
+        task_labels.append("Macro")
 
         chart_task = generate_chart(ticker)
 
@@ -277,26 +288,39 @@ async def _execute_analysis(update: Update, ticker: str) -> None:
             ext_results = [{"source": "extended", "error": "擴展數據超時"}] * len(extended_tasks)
             chart_buf = None
 
-        # 解析擴展結果
-        tavily_data = _ensure_dict(ext_results[0], "Tavily")
+        # 解析擴展結果（按 task_labels 順序）
+        ext_map = {}
+        for i, label in enumerate(task_labels):
+            ext_map[label] = _ensure_dict(ext_results[i], label) if i < len(ext_results) else {}
 
-        history_data = {}
-        peer_data = {}
-        idx = 1
-        if Config.HISTORY_ENABLED:
-            history_data = _ensure_dict(ext_results[idx], "History") if idx < len(ext_results) else {}
-            idx += 1
-        if Config.PEER_COMPARISON_ENABLED and sector and sector != "N/A":
-            peer_data = _ensure_dict(ext_results[idx], "Peer") if idx < len(ext_results) else {}
+        tavily_data = ext_map.get("Tavily", {})
+        history_data = ext_map.get("History", {})
+        peer_data = ext_map.get("Peer", {})
+        analyst_data = ext_map.get("Analyst", {})
+        insider_data = ext_map.get("Insider", {})
+        earnings_data = ext_map.get("Earnings", {})
+        macro_data = ext_map.get("Macro", {})
 
-        logger.info(f"[{ticker}] 所有數據抓取完成，開始 AI 分析...")
+        # ── Step 1.6: 計算量化信號共識 ──
+        signals_data = compute_signals(
+            finnhub_data=finnhub_data,
+            yfinance_data=yfinance_data,
+            tradingview_data=tradingview_data,
+            history_data=history_data if history_data and "error" not in history_data else None,
+            peer_data=peer_data if peer_data and "error" not in peer_data else None,
+            analyst_data=analyst_data if analyst_data and "error" not in analyst_data else None,
+        )
+
+        total_sources = 6 + sum(1 for d in [history_data, peer_data, analyst_data, insider_data, earnings_data, macro_data] if d and "error" not in d)
+        logger.info(f"[{ticker}] 所有數據抓取完成（{total_sources} 源），開始 AI 分析...")
 
         # 更新載入訊息
         try:
             await loading_msg.edit_text(
                 f"⏳ 正在分析 {ticker}...\n"
-                f"✅ 數據抓取完成（6 源）\n"
-                f"🤖 AI 深度分析中..."
+                f"✅ 數據抓取完成（{total_sources} 源）\n"
+                f"🧮 量化信號：{signals_data.get('consensus', 'N/A')}\n"
+                f"🤖 AI 四觀點深度分析中..."
             )
         except Exception:
             pass
@@ -307,6 +331,8 @@ async def _execute_analysis(update: Update, ticker: str) -> None:
                 analyze_stock(
                     ticker, finnhub_data, yfinance_data, tavily_data,
                     tradingview_data, history_data, peer_data,
+                    analyst_data, insider_data, earnings_data,
+                    macro_data, signals_data,
                 ),
                 timeout=AI_TIMEOUT,
             )
@@ -319,6 +345,11 @@ async def _execute_analysis(update: Update, ticker: str) -> None:
         report = format_report(
             ticker, finnhub_data, yfinance_data, tavily_data,
             tradingview_data, ai_analysis, history_data, peer_data,
+            signals_data=signals_data,
+            analyst_data=analyst_data,
+            insider_data=insider_data,
+            earnings_data=earnings_data,
+            macro_data=macro_data,
         )
 
         # ── Step 4: 快取並發送報告 ──
@@ -432,6 +463,8 @@ def _split_message(text: str, max_length: int = 4096) -> list[str]:
         if split_pos == -1:
             split_pos = text.rfind("══════", 0, max_length)
         if split_pos == -1:
+            split_pos = text.rfind("─ ─ ─", 0, max_length)
+        if split_pos == -1:
             split_pos = text.rfind("\n\n", 0, max_length)
         if split_pos == -1:
             split_pos = text.rfind("\n", 0, max_length)
@@ -447,8 +480,6 @@ def _split_message(text: str, max_length: int = 4096) -> list[str]:
 async def _inline_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """處理 InlineKeyboard 按鈕回調。"""
     query = update.callback_query
-    await query.answer()
-
     data = query.data or ""
     user_id = query.from_user.id
 
@@ -456,35 +487,42 @@ async def _inline_button_handler(update: Update, context: ContextTypes.DEFAULT_T
         ticker = data.split(":", 1)[1]
         added = await add_to_watchlist(user_id, ticker)
         if added:
-            await query.edit_message_reply_markup(reply_markup=None)
-            await query.message.reply_text(f"⭐ 已將 {ticker} 加入自選股清單")
+            await query.answer(f"✅ {ticker} 已加入自選股")
+            # 更新按鈕：移除「加入自選股」，保留「重新分析」
+            new_keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔄 重新分析", callback_data=f"refresh:{ticker}")],
+            ])
+            try:
+                await query.edit_message_reply_markup(reply_markup=new_keyboard)
+            except Exception:
+                pass
         else:
-            await query.answer(f"{ticker} 已在自選股清單中", show_alert=True)
+            await query.answer(f"ℹ️ {ticker} 已在自選股清單中", show_alert=True)
 
     elif data.startswith("refresh:"):
         ticker = data.split(":", 1)[1]
         if not rate_limiter.is_allowed(user_id):
             wait = rate_limiter.retry_after(user_id)
-            await query.answer(f"請 {wait} 秒後再試", show_alert=True)
+            await query.answer(f"⏰ 請 {wait} 秒後再試", show_alert=True)
             return
+        await query.answer(f"🔄 正在重新分析 {ticker}...")
         try:
             await record_query(user_id, ticker)
         except Exception:
             pass
-        await query.edit_message_reply_markup(reply_markup=None)
-        msg = await query.message.reply_text(f"🔄 正在重新分析 {ticker}...")
         try:
-            await msg.delete()
+            await query.edit_message_reply_markup(reply_markup=None)
         except Exception:
             pass
-        # 模擬一個 update.message 來複用分析流程
-        context.args = [ticker]
-        fake_update = Update(
-            update_id=update.update_id,
-            message=query.message,
-        )
+        report_cache.invalidate(ticker)
+        raw_cache.invalidate(f"{ticker}:base")
+        # callback_query 的 update.message 為 None，需用 query.message 作為回覆目標
+        fake_update = Update(update_id=update.update_id, message=query.message)
         async with _analysis_semaphore:
             await _execute_analysis(fake_update, ticker)
+
+    else:
+        await query.answer()
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:

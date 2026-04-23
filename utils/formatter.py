@@ -1,371 +1,99 @@
 """
-報告格式化工具（三角色優化版）
-- 分析師：新增成交量、Beta、成長率展示
-- 前端：精簡結構、Markdown 安全處理
-- 後端：穩定的格式化流程
+報告格式化工具（v5 版面優化版）
+針對 Telegram 手機介面重新設計：
+- 合併為 8 大區塊，減少視覺雜訊
+- 量化共識移至頂部作為「結論先行」
+- 分析師/內部人/EPS 合併為「Smart Money」
+- 歷史/宏觀合併為「環境與動量」
+- 支撐壓力併入技術面
 """
 
 from datetime import datetime, timezone
 
 
-def _safe_value(value, prefix="", suffix="") -> str:
-    """安全格式化數值，N/A 不加前後綴。"""
+def _safe(value, prefix="", suffix="") -> str:
     if value == "N/A" or value is None:
         return "N/A"
     return f"{prefix}{value}{suffix}"
 
 
-def _format_number(value, decimals=2) -> str:
-    """格式化數字，加入千分位。"""
+def _num(value, d=2) -> str:
     if value == "N/A" or value is None:
         return "N/A"
     try:
-        num = float(value)
-        if abs(num) >= 1000:
-            return f"{num:,.{decimals}f}"
-        return f"{num:.{decimals}f}"
+        n = float(value)
+        return f"{n:,.{d}f}" if abs(n) >= 1000 else f"{n:.{d}f}"
     except (ValueError, TypeError):
         return str(value)
 
 
-def _rsi_label(rsi) -> str:
-    """根據 RSI 值給予解讀標籤。"""
-    if rsi == "N/A" or rsi is None:
-        return ""
-    try:
-        val = float(rsi)
-        if val >= 70:
-            return " ⚠️超買"
-        elif val >= 60:
-            return " 偏強"
-        elif val <= 30:
-            return " ⚠️超賣"
-        elif val <= 40:
-            return " 偏弱"
-        else:
-            return " 中性"
-    except (ValueError, TypeError):
-        return ""
-
-
-def _adx_label(adx) -> str:
-    """根據 ADX 值給予趨勢強度標籤。"""
-    if adx == "N/A" or adx is None:
-        return ""
-    try:
-        val = float(adx)
-        if val >= 50:
-            return " 極強趨勢"
-        elif val >= 25:
-            return " 強趨勢"
-        elif val >= 20:
-            return " 弱趨勢"
-        else:
-            return " 盤整"
-    except (ValueError, TypeError):
-        return ""
-
-
-def _earnings_countdown(date_str: str) -> str:
-    """計算距離財報日的天數提示。"""
-    try:
-        from datetime import date
-        ed = date.fromisoformat(date_str)
-        today = date.today()
-        days = (ed - today).days
-        if days < 0:
-            return ""
-        if days == 0:
-            return " (今天!)"
-        if days <= 7:
-            return f" (剩 {days} 天 ⚠️)"
-        if days <= 30:
-            return f" (剩 {days} 天)"
-        return f" (剩 {days} 天)"
-    except (ValueError, TypeError):
-        return ""
-
-
-def _price_position_bar(current, low_52w, high_52w) -> str:
-    """生成 52 週價格位置視覺化長條。"""
-    try:
-        cur = float(current)
-        lo = float(low_52w)
-        hi = float(high_52w)
-        if hi == lo:
-            return ""
-        position = (cur - lo) / (hi - lo)
-        position = max(0, min(1, position))  # clamp 0-1
-        filled = int(position * 10)
-        bar = "▓" * filled + "░" * (10 - filled)
-        pct = position * 100
-        return f"  52W位置: [{bar}] {pct:.0f}%"
-    except (ValueError, TypeError):
-        return ""
-
-
-def _recommendation_display(rec: str) -> str:
-    """將技術建議轉換為中文。"""
-    mapping = {
-        "STRONG_BUY": "🟢 強力買入",
-        "BUY": "🟢 買入",
-        "NEUTRAL": "🟡 中性",
-        "SELL": "🔴 賣出",
-        "STRONG_SELL": "🔴 強力賣出",
-    }
-    return mapping.get(rec, f"⚪ {rec}")
-
-
-def _data_quality_score(finnhub, yfinance, tavily, tradingview):
-    """計算數據完整度指標。"""
-    total = 4
-    available = 0
-    sources = []
-
-    for name, data in [("Finnhub", finnhub), ("yfinance", yfinance),
-                        ("Tavily", tavily), ("TradingView", tradingview)]:
-        if "error" not in data:
-            available += 1
-            sources.append(f"✅{name}")
-        else:
-            sources.append(f"❌{name}")
-
-    bar = "●" * available + "○" * (total - available)
-    return f"[{bar}] {available}/{total}", sources
-
-
-def _trend_arrows(price, ema20, sma50, sma200) -> str:
-    """生成均線趨勢排列判斷。"""
-    try:
-        p = float(price)
-        e20 = float(ema20)
-        s50 = float(sma50)
-        s200 = float(sma200)
-    except (ValueError, TypeError):
-        return ""
-
-    if p > e20 > s50 > s200:
-        return "🟢 多頭排列"
-    elif p < e20 < s50 < s200:
-        return "🔴 空頭排列"
-    elif p > s200:
-        return "🟡 偏多整理"
-    else:
-        return "🟡 偏空整理"
-
-
-def _quick_summary(finnhub_data, yfinance_data, tradingview_data) -> str:
-    """生成快速摘要區塊，讓讀者 3 秒掌握重點。"""
-    parts = []
-
-    # 漲跌
-    change_pct = finnhub_data.get("change_percent", "N/A")
-    if isinstance(change_pct, (int, float)):
-        if change_pct >= 0:
-            parts.append(f"🟢 +{change_pct}%")
-        else:
-            parts.append(f"🔴 {change_pct}%")
-
-    # 技術建議
-    rec = tradingview_data.get("recommendation", "N/A")
-    if rec != "N/A":
-        parts.append(_recommendation_display(rec))
-
-    # RSI 狀態
-    rsi = tradingview_data.get("rsi_14", "N/A")
-    if rsi != "N/A":
-        try:
-            rsi_val = float(rsi)
-            parts.append(f"RSI {rsi_val:.0f}{_rsi_label(rsi)}")
-        except (ValueError, TypeError):
-            pass
-
-    # 均線趨勢
-    price = finnhub_data.get("current_price", "N/A")
-    ema20 = tradingview_data.get("ema_20", "N/A")
-    sma50 = tradingview_data.get("sma_50", "N/A")
-    sma200 = tradingview_data.get("sma_200", "N/A")
-    trend = _trend_arrows(price, ema20, sma50, sma200)
-    if trend:
-        parts.append(trend)
-
-    if not parts:
-        return ""
-    return " | ".join(parts)
-
-
-def _volume_analysis(yfinance_data: dict) -> str:
-    """量能分析視覺化。"""
-    volume = yfinance_data.get("volume", "N/A")
-    avg_volume = yfinance_data.get("avg_volume", "N/A")
-
-    if volume == "N/A" or avg_volume == "N/A":
-        return ""
-
-    lines = []
-    lines.append("  成交量: " + volume)
-    lines.append("  平均量: " + avg_volume)
-
-    # 嘗試計算量比
-    try:
-        # 把 format 過的值轉回數字
-        def _parse(v):
-            v = str(v).replace(",", "")
-            if v.endswith("B"):
-                return float(v[:-1]) * 1e9
-            elif v.endswith("M"):
-                return float(v[:-1]) * 1e6
-            elif v.endswith("K"):
-                return float(v[:-1]) * 1e3
-            return float(v)
-
-        vol = _parse(volume)
-        avg = _parse(avg_volume)
-        if avg > 0:
-            ratio = vol / avg
-            if ratio >= 1.5:
-                lines.append(f"  量比: {ratio:.1f}x ⬆️ 明顯放量")
-            elif ratio >= 1.2:
-                lines.append(f"  量比: {ratio:.1f}x ↗️ 溫和放量")
-            elif ratio <= 0.5:
-                lines.append(f"  量比: {ratio:.1f}x ⬇️ 明顯縮量")
-            elif ratio <= 0.8:
-                lines.append(f"  量比: {ratio:.1f}x ↘️ 溫和縮量")
-            else:
-                lines.append(f"  量比: {ratio:.1f}x ➡️ 正常")
-    except (ValueError, TypeError):
-        pass
-
-    return "\n".join(lines)
-
-
-def _format_return(val) -> str:
-    """格式化報酬率。"""
+def _ret(val) -> str:
     if val == "N/A" or val is None:
         return "N/A"
     try:
         v = float(val)
-        emoji = "🟢" if v >= 0 else "🔴"
-        return f"{emoji} {v:+.2f}%"
+        return f"{'🟢' if v >= 0 else '🔴'} {v:+.1f}%"
     except (ValueError, TypeError):
         return "N/A"
 
 
-def _format_sr_section(history_data: dict) -> list[str]:
-    """格式化支撐壓力位區塊。"""
-    sr = history_data.get("support_resistance", {})
-    if not sr:
-        return []
-
-    lines = []
-    lines.append("")
-    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━")
-    lines.append("🎯 *支撐壓力位*")
-
-    if "resistance_20d" in sr:
-        lines.append(f"  短期壓力: ${_format_number(sr['resistance_20d'])}  "
-                     f"支撐: ${_format_number(sr['support_20d'])}")
-    if "resistance_60d" in sr:
-        lines.append(f"  中期壓力: ${_format_number(sr['resistance_60d'])}  "
-                     f"支撐: ${_format_number(sr['support_60d'])}")
-
-    # 動態均線參考
-    parts = []
-    if "sma20" in sr:
-        parts.append(f"SMA20(${_format_number(sr['sma20'])})={sr['sma20_position']}")
-    if "sma50" in sr:
-        parts.append(f"SMA50(${_format_number(sr['sma50'])})={sr['sma50_position']}")
-    if parts:
-        lines.append(f"  動態: {' | '.join(parts)}")
-
-    return lines
+def _rsi_tag(rsi) -> str:
+    if rsi == "N/A" or rsi is None:
+        return ""
+    try:
+        v = float(rsi)
+        if v >= 70: return " ⚠️超買"
+        if v >= 60: return " 偏強"
+        if v <= 30: return " ⚠️超賣"
+        if v <= 40: return " 偏弱"
+        return " 中性"
+    except (ValueError, TypeError):
+        return ""
 
 
-def _format_history_section(history_data: dict) -> list[str]:
-    """格式化歷史回測區塊。"""
-    if not history_data or "error" in history_data:
-        return []
-
-    lines = []
-    lines.append("")
-    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━")
-    lines.append("📉 *歷史回測*")
-
-    # 區間報酬率
-    ret_7d = _format_return(history_data.get("return_7d"))
-    ret_30d = _format_return(history_data.get("return_30d"))
-    ret_60d = _format_return(history_data.get("return_60d"))
-    ret_90d = _format_return(history_data.get("return_90d"))
-
-    lines.append(f"  7日: {ret_7d}  30日: {ret_30d}")
-    lines.append(f"  60日: {ret_60d}  90日: {ret_90d}")
-
-    # 波動率
-    vol = history_data.get("volatility_30d", "N/A")
-    if vol != "N/A":
-        vol_label = "⚠️偏高" if float(vol) > 40 else ("中等" if float(vol) > 20 else "低")
-        lines.append(f"  30日年化波動: {vol}% ({vol_label})")
-
-    # 相對強弱 vs SPY
-    alpha_30 = history_data.get("alpha_vs_spy_30d", "N/A")
-    alpha_90 = history_data.get("alpha_vs_spy_90d", "N/A")
-    if alpha_30 != "N/A" or alpha_90 != "N/A":
-        lines.append("  vs SPY:")
-        if alpha_30 != "N/A":
-            spy_30 = history_data.get("spy_return_30d", "N/A")
-            emoji_30 = "🟢" if float(alpha_30) >= 0 else "🔴"
-            lines.append(f"    30日 Alpha: {emoji_30} {alpha_30:+.2f}%  (SPY: {spy_30}%)")
-        if alpha_90 != "N/A":
-            spy_90 = history_data.get("spy_return_90d", "N/A")
-            emoji_90 = "🟢" if float(alpha_90) >= 0 else "🔴"
-            lines.append(f"    90日 Alpha: {emoji_90} {alpha_90:+.2f}%  (SPY: {spy_90}%)")
-
-    return lines
+def _rec_cn(rec: str) -> str:
+    return {
+        "STRONG_BUY": "🟢 強力買入", "BUY": "🟢 買入", "NEUTRAL": "🟡 中性",
+        "SELL": "🔴 賣出", "STRONG_SELL": "🔴 強力賣出",
+    }.get(rec, f"⚪ {rec}")
 
 
-def _format_peer_section(peer_data: dict, yfinance_data: dict) -> list[str]:
-    """格式化同業比較區塊。"""
-    if not peer_data or "error" in peer_data:
-        return []
+def _trend(price, ema20, sma50, sma200) -> str:
+    try:
+        p, e, s5, s2 = float(price), float(ema20), float(sma50), float(sma200)
+    except (ValueError, TypeError):
+        return ""
+    if p > e > s5 > s2: return "🟢 多頭排列"
+    if p < e < s5 < s2: return "🔴 空頭排列"
+    return "🟡 偏多整理" if p > s2 else "🟡 偏空整理"
 
-    lines = []
-    lines.append("")
-    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━")
-    lines.append("🏢 *同業比較*")
 
-    peers_str = " ".join(peer_data.get("peers", []))
-    lines.append(f"  比較對象: {peers_str}")
+def _pos_bar(cur, lo52, hi52) -> str:
+    try:
+        c, lo, hi = float(cur), float(lo52), float(hi52)
+        if hi == lo: return ""
+        pos = max(0, min(1, (c - lo) / (hi - lo)))
+        filled = int(pos * 10)
+        return f"[{'▓' * filled}{'░' * (10 - filled)}] {pos * 100:.0f}%"
+    except (ValueError, TypeError):
+        return ""
 
-    # 與同業平均對比
-    avg_pe = peer_data.get("sector_avg_pe", "N/A")
-    my_pe = yfinance_data.get("pe_ratio", "N/A")
-    if avg_pe != "N/A" and my_pe != "N/A":
-        try:
-            diff = ((float(my_pe) / float(avg_pe)) - 1) * 100
-            hint = "偏高" if diff > 10 else ("偏低" if diff < -10 else "接近")
-            lines.append(f"  PE: {_format_number(my_pe)} vs 同業 {_format_number(avg_pe)} ({hint})")
-        except (ValueError, TypeError):
-            pass
 
-    avg_margin = peer_data.get("sector_avg_profit_margin", "N/A")
-    my_margin = yfinance_data.get("profit_margin", "N/A")
-    if avg_margin != "N/A" and my_margin != "N/A":
-        try:
-            avg_pct = f"{float(avg_margin) * 100:.2f}%"
-            lines.append(f"  利潤率: {my_margin} vs 同業 {avg_pct}")
-        except (ValueError, TypeError):
-            pass
+def _earnings_countdown(ds: str) -> str:
+    try:
+        from datetime import date
+        days = (date.fromisoformat(ds) - date.today()).days
+        if days < 0: return ""
+        if days == 0: return " (今天!)"
+        if days <= 7: return f" (剩{days}天 ⚠️)"
+        return f" (剩{days}天)"
+    except (ValueError, TypeError):
+        return ""
 
-    avg_growth = peer_data.get("sector_avg_revenue_growth", "N/A")
-    my_growth = yfinance_data.get("revenue_growth", "N/A")
-    if avg_growth != "N/A" and my_growth != "N/A":
-        try:
-            avg_pct = f"{float(avg_growth) * 100:.2f}%"
-            lines.append(f"  營收成長: {my_growth} vs 同業 {avg_pct}")
-        except (ValueError, TypeError):
-            pass
 
-    return lines
+# ═══ 分隔線 ═══
+DIV = "─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─"
+DIV_BOLD = "━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 
 def format_report(
@@ -377,259 +105,478 @@ def format_report(
     ai_analysis: str,
     history_data: dict | None = None,
     peer_data: dict | None = None,
+    signals_data: dict | None = None,
+    analyst_data: dict | None = None,
+    insider_data: dict | None = None,
+    earnings_data: dict | None = None,
+    macro_data: dict | None = None,
 ) -> str:
-    """
-    組裝完整的分析報告（三角色優化版 v3）。
-    """
-    report_parts = []
+    L = []
 
-    # ══ 標題 ══
-    company_name = yfinance_data.get("company_name", ticker.upper())
-    if company_name == "N/A":
-        company_name = ticker.upper()
+    # ════════════════════════════════════════
+    # 1. HEADER + VERDICT
+    # ════════════════════════════════════════
+    yf = yfinance_data
+    fh = finnhub_data
+    tv = tradingview_data
 
-    sector = yfinance_data.get("sector", "")
-    industry = yfinance_data.get("industry", "")
-    sector_line = f"{sector} | {industry}" if sector not in ("N/A", "") and industry not in ("N/A", "") else ""
+    name = yf.get("company_name", ticker.upper())
+    if name == "N/A": name = ticker.upper()
+    sector = yf.get("sector", "")
+    industry = yf.get("industry", "")
 
-    report_parts.append(f"📊 *{ticker.upper()} — {company_name}*")
-    if sector_line:
-        report_parts.append(sector_line)
+    L.append(f"📊 *{ticker.upper()} — {name}*")
+    if sector not in ("N/A", "") and industry not in ("N/A", ""):
+        L.append(f"{sector} · {industry}")
 
-    # 快速摘要（3 秒掌握重點）
-    if "error" not in finnhub_data and "error" not in tradingview_data:
-        summary = _quick_summary(finnhub_data, yfinance_data, tradingview_data)
-        if summary:
-            report_parts.append(f"⚡ {summary}")
+    # Quick verdict line
+    parts = []
+    if "error" not in fh:
+        cp = fh.get("change_percent", "N/A")
+        if isinstance(cp, (int, float)):
+            parts.append(f"{'🟢' if cp >= 0 else '🔴'} {cp:+.2f}%")
+    if "error" not in tv:
+        rec = tv.get("recommendation", "N/A")
+        if rec != "N/A": parts.append(_rec_cn(rec))
+        rsi = tv.get("rsi_14", "N/A")
+        if rsi != "N/A":
+            try: parts.append(f"RSI {float(rsi):.0f}{_rsi_tag(rsi)}")
+            except: pass
+    if parts:
+        L.append(f"⚡ {' | '.join(parts)}")
 
-    # 數據品質
-    quality_score, quality_sources = _data_quality_score(
-        finnhub_data, yfinance_data, tavily_data, tradingview_data
-    )
-    report_parts.append(f"🔋 數據: {quality_score} {' '.join(quality_sources)}")
-    report_parts.append("━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    # Signals consensus banner (結論先行)
+    if signals_data:
+        con = signals_data.get("consensus", "N/A")
+        sc = signals_data.get("weighted_score", 0)
+        conf = signals_data.get("confidence", 0)
+        bc = signals_data.get("bullish_count", 0)
+        brc = signals_data.get("bearish_count", 0)
+        nc = signals_data.get("neutral_count", 0)
+        em = {"BULLISH": "🟢", "BEARISH": "🔴", "NEUTRAL": "🟡"}.get(con, "⚪")
+        L.append(f"🧮 {em} *{con}*  分數 {sc:+.3f}  信心 {conf}%  ({bc}多/{brc}空/{nc}中)")
 
-    # ══ 即時報價 ══
-    if "error" not in finnhub_data:
-        price = finnhub_data.get("current_price", "N/A")
-        change_pct = finnhub_data.get("change_percent", "N/A")
-        change = finnhub_data.get("change", "N/A")
+    L.append(DIV_BOLD)
 
-        if isinstance(change_pct, (int, float)):
-            if change_pct >= 0:
-                chg = f"🟢 +{change_pct}% (+${abs(change) if isinstance(change, (int, float)) else 'N/A'})"
-            else:
-                chg = f"🔴 {change_pct}% (${change})"
-        else:
-            chg = ""
+    # ════════════════════════════════════════
+    # 2. PRICE
+    # ════════════════════════════════════════
+    if "error" not in fh:
+        price = fh.get("current_price", "N/A")
+        cp = fh.get("change_percent", "N/A")
+        chg = fh.get("change", "N/A")
 
-        report_parts.append(f"💰 現價: ${_format_number(price)}  {chg}")
-        report_parts.append(
-            f"  高/低: ${_format_number(finnhub_data.get('high'))} / "
-            f"${_format_number(finnhub_data.get('low'))}  "
-            f"前收: ${_format_number(finnhub_data.get('previous_close'))}"
-        )
+        chg_str = ""
+        if isinstance(cp, (int, float)):
+            sign = "+" if cp >= 0 else ""
+            chg_str = f"  {'🟢' if cp >= 0 else '🔴'} {sign}{cp}%"
+            if isinstance(chg, (int, float)):
+                chg_str += f" ({sign}${abs(chg):.2f})"
 
-        # 52 週位置
-        if "error" not in yfinance_data:
-            pos_bar = _price_position_bar(
-                price, yfinance_data.get("52w_low"), yfinance_data.get("52w_high")
-            )
-            if pos_bar:
-                report_parts.append(pos_bar)
+        L.append(f"💰 ${_num(price)}{chg_str}")
+        L.append(f"  高 ${_num(fh.get('high'))} / 低 ${_num(fh.get('low'))} / 前收 ${_num(fh.get('previous_close'))}")
+
+        if "error" not in yf:
+            bar = _pos_bar(price, yf.get("52w_low"), yf.get("52w_high"))
+            if bar:
+                L.append(f"  52W {bar}  (${_num(yf.get('52w_low'))}~${_num(yf.get('52w_high'))})")
     else:
-        report_parts.append(f"💰 ⚠️ {finnhub_data['error']}")
+        L.append(f"💰 ⚠️ {fh.get('error', '報價不可用')}")
 
-    # ══ 基本面 ══
-    report_parts.append("")
-    report_parts.append("━━━━━━━━━━━━━━━━━━━━━━━━━━")
-    report_parts.append("📈 *基本面*")
+    # ════════════════════════════════════════
+    # 3. FUNDAMENTALS (精簡)
+    # ════════════════════════════════════════
+    L.append("")
+    L.append(f"{DIV}")
+    L.append("📈 *基本面*")
 
-    if "error" not in yfinance_data:
-        report_parts.append(f"  市值: {yfinance_data.get('market_cap', 'N/A')}  "
-                           f"Beta: {_safe_value(yfinance_data.get('beta'))}")
+    if "error" not in yf:
+        L.append(f"  市值 {yf.get('market_cap', 'N/A')}  Beta {_safe(yf.get('beta'))}")
 
-        # 估值
-        pe = yfinance_data.get("pe_ratio", "N/A")
-        fpe = yfinance_data.get("forward_pe", "N/A")
+        pe = yf.get("pe_ratio", "N/A")
+        fpe = yf.get("forward_pe", "N/A")
         pe_hint = ""
         try:
             if pe != "N/A" and fpe != "N/A":
-                # Forward PE < Trailing PE → 市場預期未來獲利成長（EPS↑ 使 PE↓）
                 pe_hint = " 📈成長預期" if float(fpe) < float(pe) else " 📉成長放緩"
         except (ValueError, TypeError):
             pass
+        L.append(f"  PE {_num(pe)} → Forward PE {_num(fpe)}{pe_hint}")
+        L.append(f"  PEG {_safe(yf.get('peg_ratio'))}  EPS ${_safe(yf.get('eps'))}  殖利率 {yf.get('dividend_yield', 'N/A')}")
 
-        report_parts.append(f"  PE: {_format_number(pe)}  "
-                           f"Forward PE: {_format_number(fpe)}{pe_hint}")
-        report_parts.append(f"  EPS: {_safe_value(yfinance_data.get('eps'), prefix='$')}  "
-                           f"PEG: {_safe_value(yfinance_data.get('peg_ratio'))}")
-        report_parts.append(f"  殖利率: {yfinance_data.get('dividend_yield', 'N/A')}  "
-                           f"利潤率: {yfinance_data.get('profit_margin', 'N/A')}")
+        # 獲利品質
+        roe = yf.get("roe", "N/A")
+        roa = yf.get("roa", "N/A")
+        margin = yf.get("profit_margin", "N/A")
+        op_m = yf.get("operating_margin", "N/A")
+        if roe != "N/A" or margin != "N/A":
+            L.append(f"  ROE {roe}  ROA {roa}")
+            L.append(f"  淨利率 {margin}  營業利潤率 {op_m}")
 
-        # 獲利能力
-        roe = yfinance_data.get("roe", "N/A")
-        roa = yfinance_data.get("roa", "N/A")
-        op_margin = yfinance_data.get("operating_margin", "N/A")
-        if roe != "N/A" or roa != "N/A":
-            report_parts.append(f"  ROE: {roe}  ROA: {roa}  營業利潤率: {op_margin}")
+        # 成長
+        rg = yf.get("revenue_growth", "N/A")
+        eg = yf.get("earnings_growth", "N/A")
+        if rg != "N/A" or eg != "N/A":
+            growth_tag = ""
+            try:
+                if rg != "N/A" and eg != "N/A":
+                    rv = float(str(rg).replace("%", ""))
+                    ev = float(str(eg).replace("%", ""))
+                    if rv > 0 and ev > rv:
+                        growth_tag = " (盈餘加速)"
+                    elif rv > 0 and ev < 0:
+                        growth_tag = " ⚠️利潤壓縮"
+            except (ValueError, TypeError):
+                pass
+            L.append(f"  營收成長 {rg}  盈餘成長 {eg}{growth_tag}")
 
-        # 成長指標
-        rev_growth = yfinance_data.get("revenue_growth", "N/A")
-        earn_growth = yfinance_data.get("earnings_growth", "N/A")
-        if rev_growth != "N/A" or earn_growth != "N/A":
-            report_parts.append(f"  營收成長: {rev_growth}  盈餘成長: {earn_growth}")
-
-        # 現金流與財務健康
-        fcf = yfinance_data.get("free_cash_flow", "N/A")
-        de = yfinance_data.get("debt_to_equity", "N/A")
+        # 財務健康
+        fcf = yf.get("free_cash_flow", "N/A")
+        de = yf.get("debt_to_equity", "N/A")
+        cr = yf.get("current_ratio", "N/A")
         if fcf != "N/A" or de != "N/A":
-            cr = yfinance_data.get("current_ratio", "N/A")
-            report_parts.append(f"  FCF: {fcf}  D/E: {_safe_value(de)}  流動比率: {_safe_value(cr)}")
+            de_tag = ""
+            try:
+                if de != "N/A":
+                    dev = float(de)
+                    if dev > 150: de_tag = " ⚠️高槓桿"
+                    elif dev < 50: de_tag = " 低槓桿"
+            except (ValueError, TypeError):
+                pass
+            cr_tag = ""
+            try:
+                if cr != "N/A":
+                    crv = float(cr)
+                    if crv < 1.0: cr_tag = " ⚠️"
+            except (ValueError, TypeError):
+                pass
+            L.append(f"  FCF {fcf}  D/E {_safe(de)}{de_tag}  流動比率 {_safe(cr)}{cr_tag}")
 
-        # 估值補充
-        ev_ebitda = yfinance_data.get("ev_to_ebitda", "N/A")
-        pb = yfinance_data.get("price_to_book", "N/A")
-        ps = yfinance_data.get("price_to_sales", "N/A")
-        if ev_ebitda != "N/A" or pb != "N/A":
-            report_parts.append(f"  EV/EBITDA: {_safe_value(ev_ebitda)}  P/B: {_safe_value(pb)}  P/S: {_safe_value(ps)}")
+        # 補充估值
+        ev = yf.get("ev_to_ebitda", "N/A")
+        pb = yf.get("price_to_book", "N/A")
+        ps = yf.get("price_to_sales", "N/A")
+        if ev != "N/A" or pb != "N/A":
+            L.append(f"  EV/EBITDA {_safe(ev)}  P/B {_safe(pb)}  P/S {_safe(ps)}")
 
-        # 財報日期
-        earnings_date = yfinance_data.get("earnings_date", "N/A")
-        if earnings_date != "N/A":
-            _ed_hint = _earnings_countdown(earnings_date)
-            report_parts.append(f"  📅 下次財報: {earnings_date}{_ed_hint}")
+        # 財報日
+        ed = yf.get("earnings_date", "N/A")
+        if ed != "N/A":
+            L.append(f"  📅 下次財報 {ed}{_earnings_countdown(ed)}")
 
-        # 籌碼面
-        short_ratio = yfinance_data.get("short_ratio", "N/A")
-        inst_pct = yfinance_data.get("held_pct_institutions", "N/A")
-        if short_ratio != "N/A" or inst_pct != "N/A":
-            report_parts.append(f"  空頭比率: {_safe_value(short_ratio)}  "
-                               f"機構持股: {inst_pct}")
+        # 籌碼
+        sr = yf.get("short_ratio", "N/A")
+        inst = yf.get("held_pct_institutions", "N/A")
+        if sr != "N/A" or inst != "N/A":
+            sr_tag = ""
+            try:
+                if sr != "N/A" and float(sr) > 5:
+                    sr_tag = " ⚠️偏高"
+            except (ValueError, TypeError):
+                pass
+            L.append(f"  空頭比率 {_safe(sr)}{sr_tag}  機構持股 {inst}")
 
-        # 價格區間
-        report_parts.append(f"  52W: ${_format_number(yfinance_data.get('52w_low'))} ~ "
-                           f"${_format_number(yfinance_data.get('52w_high'))}")
-        report_parts.append(f"  50MA: ${_format_number(yfinance_data.get('50d_avg'))}  "
-                           f"200MA: ${_format_number(yfinance_data.get('200d_avg'))}")
+        # 同業比較
+        if peer_data and "error" not in peer_data:
+            peer_parts = []
+            avg_pe = peer_data.get("sector_avg_pe", "N/A")
+            if avg_pe != "N/A" and pe != "N/A":
+                try:
+                    diff = ((float(pe) / float(avg_pe)) - 1) * 100
+                    tag = "↑偏高" if diff > 10 else ("↓偏低" if diff < -10 else "≈接近")
+                    peer_parts.append(f"PE {_num(pe)} vs 同業 {_num(avg_pe)}({tag})")
+                except (ValueError, TypeError):
+                    pass
+            avg_margin = peer_data.get("sector_avg_profit_margin", "N/A")
+            if avg_margin != "N/A" and margin != "N/A":
+                try:
+                    avg_pct = f"{float(avg_margin) * 100:.1f}%"
+                    peer_parts.append(f"利潤率 {margin} vs {avg_pct}")
+                except (ValueError, TypeError):
+                    pass
+            if peer_parts:
+                peers_str = ", ".join(peer_data.get("peers", [])[:4])
+                L.append(f"  vs同業({peers_str})")
+                for pp in peer_parts:
+                    L.append(f"    {pp}")
     else:
-        report_parts.append(f"  ⚠️ {yfinance_data['error']}")
+        L.append(f"  ⚠️ {yf.get('error', '基本面不可用')}")
 
-    # ══ 量能 ══
-    if "error" not in yfinance_data:
-        vol_analysis = _volume_analysis(yfinance_data)
-        if vol_analysis:
-            report_parts.append("")
-            report_parts.append("━━━━━━━━━━━━━━━━━━━━━━━━━━")
-            report_parts.append("📦 *量能分析*")
-            report_parts.append(vol_analysis)
+    # ════════════════════════════════════════
+    # 4. TECHNICALS (含量能 + 支撐壓力)
+    # ════════════════════════════════════════
+    L.append("")
+    L.append(f"{DIV}")
+    L.append("📊 *技術面*")
 
-    # ══ 技術面 ══
-    report_parts.append("")
-    report_parts.append("━━━━━━━━━━━━━━━━━━━━━━━━━━")
-    report_parts.append("🔍 *技術面信號*")
+    if "error" not in tv:
+        rec = tv.get("recommendation", "N/A")
+        buy = tv.get("buy_signals", 0)
+        sell = tv.get("sell_signals", 0)
+        neu = tv.get("neutral_signals", 0)
 
-    if "error" not in tradingview_data:
-        rec = tradingview_data.get("recommendation", "N/A")
-        buy = tradingview_data.get("buy_signals", 0)
-        sell = tradingview_data.get("sell_signals", 0)
-        neutral = tradingview_data.get("neutral_signals", 0)
+        L.append(f"  建議 {_rec_cn(rec)}")
 
-        report_parts.append(f"  建議: {_recommendation_display(rec)}")
-
-        # 信號比例
         try:
-            total_signals = int(buy) + int(sell) + int(neutral)
-            if total_signals > 0:
-                buy_bar = "🟢" * int(int(buy) / total_signals * 10)
-                sell_bar = "🔴" * int(int(sell) / total_signals * 10)
-                neutral_bar = "🟡" * (10 - len(buy_bar) - len(sell_bar))
-                report_parts.append(f"  {buy_bar}{neutral_bar}{sell_bar} 買{buy}/中{neutral}/賣{sell}")
+            tot = int(buy) + int(sell) + int(neu)
+            if tot > 0:
+                bg = "🟢" * int(int(buy) / tot * 10)
+                sg = "🔴" * int(int(sell) / tot * 10)
+                ng = "🟡" * (10 - len(bg) - len(sg))
+                L.append(f"  {bg}{ng}{sg}  買{buy}/中{neu}/賣{sell}")
         except (ValueError, TypeError):
             pass
 
-        # 動能指標（精簡排版）
-        rsi = tradingview_data.get("rsi_14", "N/A")
-        adx = tradingview_data.get("adx", "N/A")
-        report_parts.append(f"  RSI: {rsi}{_rsi_label(rsi)}  ADX: {adx}{_adx_label(adx)}")
-        report_parts.append(f"  MACD: {tradingview_data.get('macd', 'N/A')}  "
-                           f"Signal: {tradingview_data.get('macd_signal', 'N/A')}")
+        rsi = tv.get("rsi_14", "N/A")
+        adx = tv.get("adx", "N/A")
+        adx_tag = ""
+        try:
+            av = float(adx)
+            adx_tag = " 強趨勢" if av >= 25 else (" 盤整" if av < 20 else " 弱趨勢")
+        except (ValueError, TypeError):
+            pass
+        L.append(f"  RSI {rsi}{_rsi_tag(rsi)}  ADX {adx}{adx_tag}")
 
-        # 均線 + 趨勢排列
-        ema20 = tradingview_data.get('ema_20')
-        sma50 = tradingview_data.get('sma_50')
-        sma200 = tradingview_data.get('sma_200')
-        report_parts.append(f"  EMA20: ${_format_number(ema20)}  "
-                           f"SMA50: ${_format_number(sma50)}  "
-                           f"SMA200: ${_format_number(sma200)}")
+        macd = tv.get("macd", "N/A")
+        macd_s = tv.get("macd_signal", "N/A")
+        macd_tag = ""
+        try:
+            if macd != "N/A" and macd_s != "N/A":
+                macd_tag = " 金叉" if float(macd) > float(macd_s) else " 死叉"
+        except (ValueError, TypeError):
+            pass
+        L.append(f"  MACD {macd} / Signal {macd_s}{macd_tag}")
 
-        # 均線趨勢判斷
-        price = finnhub_data.get("current_price", "N/A") if "error" not in finnhub_data else "N/A"
-        trend = _trend_arrows(price, ema20, sma50, sma200)
-        if trend:
-            report_parts.append(f"  趨勢: {trend}")
+        # 均線 + 趨勢
+        ema20 = tv.get("ema_20", "N/A")
+        sma50 = tv.get("sma_50", "N/A")
+        sma200 = tv.get("sma_200", "N/A")
+        price = fh.get("current_price", "N/A") if "error" not in fh else "N/A"
+        tr = _trend(price, ema20, sma50, sma200)
+        if tr:
+            L.append(f"  {tr}  EMA20 ${_num(ema20)} / SMA50 ${_num(sma50)} / SMA200 ${_num(sma200)}")
+        else:
+            L.append(f"  EMA20 ${_num(ema20)} / SMA50 ${_num(sma50)} / SMA200 ${_num(sma200)}")
 
-        # 布林通道
-        bb_upper = tradingview_data.get("bb_upper", "N/A")
-        bb_lower = tradingview_data.get("bb_lower", "N/A")
-        if bb_upper != "N/A" and bb_lower != "N/A":
-            report_parts.append(f"  布林: ${_format_number(bb_upper)} ~ ${_format_number(bb_lower)}")
+        # 布林
+        bbu = tv.get("bb_upper", "N/A")
+        bbl = tv.get("bb_lower", "N/A")
+        if bbu != "N/A" and bbl != "N/A":
+            L.append(f"  布林 ${_num(bbl)}~${_num(bbu)}")
 
-        # 子類別建議
-        ma_rec = tradingview_data.get("moving_averages", {}).get("recommendation", "N/A")
-        osc_rec = tradingview_data.get("oscillators", {}).get("recommendation", "N/A")
-        if ma_rec != "N/A" or osc_rec != "N/A":
-            report_parts.append(f"  均線: {_recommendation_display(ma_rec)}  "
-                               f"震盪: {_recommendation_display(osc_rec)}")
+        # 量能 (內嵌)
+        if "error" not in yf:
+            vol = yf.get("volume", "N/A")
+            avg_vol = yf.get("avg_volume", "N/A")
+            if vol != "N/A" and avg_vol != "N/A":
+                vol_tag = ""
+                try:
+                    def _pv(v):
+                        v = str(v).replace(",", "")
+                        for s, m in [("B", 1e9), ("M", 1e6), ("K", 1e3)]:
+                            if v.endswith(s): return float(v[:-1]) * m
+                        return float(v)
+                    ratio = _pv(vol) / _pv(avg_vol)
+                    if ratio >= 1.5: vol_tag = " ⬆️放量"
+                    elif ratio >= 1.2: vol_tag = " ↗️溫和放量"
+                    elif ratio <= 0.5: vol_tag = " ⬇️縮量"
+                    elif ratio <= 0.8: vol_tag = " ↘️溫和縮量"
+                    else: vol_tag = ""
+                    vol_tag = f" ({ratio:.1f}x{vol_tag})" if vol_tag else f" ({ratio:.1f}x)"
+                except (ValueError, TypeError):
+                    pass
+                L.append(f"  量能 {vol} / 均量 {avg_vol}{vol_tag}")
+
+        # 支撐壓力
+        if history_data and "error" not in history_data:
+            sr = history_data.get("support_resistance", {})
+            if sr:
+                if "support_20d" in sr and "resistance_20d" in sr:
+                    L.append(f"  短期: 支撐 ${_num(sr['support_20d'])} / 壓力 ${_num(sr['resistance_20d'])}")
+                if "support_60d" in sr and "resistance_60d" in sr:
+                    L.append(f"  中期: 支撐 ${_num(sr['support_60d'])} / 壓力 ${_num(sr['resistance_60d'])}")
     else:
-        report_parts.append(f"  ⚠️ {tradingview_data['error']}")
+        L.append(f"  ⚠️ {tv.get('error', '技術面不可用')}")
 
-    # ══ 歷史回測 ══
-    if history_data:
-        report_parts.extend(_format_history_section(history_data))
-        report_parts.extend(_format_sr_section(history_data))
+    # ════════════════════════════════════════
+    # 5. PERFORMANCE + MACRO (歷史表現 & 環境)
+    # ════════════════════════════════════════
+    has_hist = history_data and "error" not in history_data
+    has_macro = macro_data and "error" not in macro_data
 
-    # ══ 同業比較 ══
-    if peer_data:
-        report_parts.extend(_format_peer_section(peer_data, yfinance_data))
+    if has_hist or has_macro:
+        L.append("")
+        L.append(f"{DIV}")
+        L.append("📉 *表現 & 環境*")
 
-    # ══ 新聞 ══
-    report_parts.append("")
-    report_parts.append("━━━━━━━━━━━━━━━━━━━━━━━━━━")
-    report_parts.append("📰 *新聞*")
+        if has_hist:
+            r7 = _ret(history_data.get("return_7d"))
+            r30 = _ret(history_data.get("return_30d"))
+            r60 = _ret(history_data.get("return_60d"))
+            r90 = _ret(history_data.get("return_90d"))
+            L.append(f"  報酬率: 7d {r7}  30d {r30}")
+            L.append(f"          60d {r60}  90d {r90}")
+
+            vol30 = history_data.get("volatility_30d", "N/A")
+            if vol30 != "N/A":
+                try:
+                    v = float(vol30)
+                    vl = "⚠️高風險" if v > 40 else ("中等" if v > 20 else "低風險")
+                    L.append(f"  30日年化波動率 {vol30}% ({vl})")
+                except (ValueError, TypeError):
+                    pass
+
+            a30 = history_data.get("alpha_vs_spy_30d", "N/A")
+            a90 = history_data.get("alpha_vs_spy_90d", "N/A")
+            if a30 != "N/A" or a90 != "N/A":
+                L.append("  vs SPY 大盤:")
+                if a30 != "N/A":
+                    ae = "🟢 跑贏" if float(a30) >= 0 else "🔴 跑輸"
+                    spy30 = history_data.get("spy_return_30d", "N/A")
+                    L.append(f"    30d Alpha {a30:+.1f}% ({ae})  SPY {spy30}%")
+                if a90 != "N/A":
+                    ae9 = "🟢 跑贏" if float(a90) >= 0 else "🔴 跑輸"
+                    spy90 = history_data.get("spy_return_90d", "N/A")
+                    L.append(f"    90d Alpha {a90:+.1f}% ({ae9})  SPY {spy90}%")
+
+        if has_macro:
+            vix = macro_data.get("vix", "N/A")
+            us10y = macro_data.get("us10y", "N/A")
+            risk = macro_data.get("risk_label", "")
+            risk_env = macro_data.get("risk_environment", "N/A")
+            macro_parts = []
+            if vix != "N/A":
+                macro_parts.append(f"VIX {vix}")
+            if us10y != "N/A":
+                macro_parts.append(f"10Y {us10y}%")
+            if macro_parts:
+                re = {"risk_on": "🟢", "risk_off": "🔴"}.get(risk_env, "🟡")
+                L.append(f"  🌍 {' | '.join(macro_parts)}  {re} {risk}")
+
+    # ════════════════════════════════════════
+    # 6. SMART MONEY (分析師 + 內部人 + EPS)
+    # ════════════════════════════════════════
+    has_analyst = analyst_data and "error" not in analyst_data and analyst_data.get("total_analysts", 0) > 0
+    has_insider = insider_data and "error" not in insider_data
+    has_eps = earnings_data and "error" not in earnings_data and earnings_data.get("total_quarters", 0) > 0
+
+    if has_analyst or has_insider or has_eps:
+        L.append("")
+        L.append(f"{DIV}")
+        L.append("🏦 *Smart Money*")
+
+        if has_analyst:
+            con = analyst_data.get("consensus", "N/A")
+            tot = analyst_data.get("total_analysts", 0)
+            ae = {"strongBuy": "🟢", "buy": "🟢", "hold": "🟡", "sell": "🔴", "strongSell": "🔴"}.get(con, "⚪")
+            sb = analyst_data.get("strong_buy", 0)
+            b = analyst_data.get("buy", 0)
+            h = analyst_data.get("hold", 0)
+            s = analyst_data.get("sell", 0)
+            ss = analyst_data.get("strong_sell", 0)
+            L.append(f"  {ae} 分析師 {con} ({tot}位)  強買{sb}/買{b}/持{h}/賣{s}/強賣{ss}")
+
+            tm = analyst_data.get("target_median", "N/A")
+            tl = analyst_data.get("target_low", "N/A")
+            th = analyst_data.get("target_high", "N/A")
+            if tm != "N/A":
+                # 計算 upside/downside
+                upside_str = ""
+                cur_price = fh.get("current_price", "N/A") if "error" not in fh else "N/A"
+                if cur_price != "N/A" and tm != "N/A":
+                    try:
+                        upside = ((float(tm) - float(cur_price)) / float(cur_price)) * 100
+                        upside_str = f" ({'🟢' if upside >= 0 else '🔴'} {upside:+.1f}%)"
+                    except (ValueError, TypeError):
+                        pass
+                L.append(f"  🎯 目標 ${_num(tm)}{upside_str}  (${_num(tl)}~${_num(th)})")
+
+        if has_insider:
+            total_tx = insider_data.get("total_transactions", 0)
+            if total_tx > 0:
+                sent = insider_data.get("net_sentiment", "neutral")
+                sent_cn = {"bullish": "偏多（內部人淨買入）", "bearish": "偏空（內部人淨賣出）"}.get(sent, "中性")
+                ie = {"bullish": "🟢", "bearish": "🔴"}.get(sent, "🟡")
+                bc = insider_data.get("buy_count", 0)
+                sc = insider_data.get("sell_count", 0)
+                bv = insider_data.get("buy_value", 0)
+                sv = insider_data.get("sell_value", 0)
+                L.append(f"  {ie} 內部人動向: {sent_cn}")
+                L.append(f"    買入 {bc}筆(${_num(bv, 0)}) / 賣出 {sc}筆(${_num(sv, 0)})")
+
+                notable = insider_data.get("notable_transactions", [])
+                for tx in notable[:3]:
+                    L.append(f"    {tx['type']} {tx['name']} ${_num(tx['value_usd'], 0)} ({tx['date']})")
+
+        if has_eps:
+            track = earnings_data.get("track_record", "N/A")
+            beat = earnings_data.get("beat_count", 0)
+            miss = earnings_data.get("miss_count", 0)
+            total_q = earnings_data.get("total_quarters", 0)
+            te = {"excellent": "🟢", "good": "🟢", "poor": "🔴", "mixed": "🟡"}.get(track, "⚪")
+            L.append(f"  {te} EPS 歷史紀錄: {beat}/{total_q} 季超預期")
+
+            quarters = earnings_data.get("quarters", [])
+            for q in quarters[:4]:
+                sp = q.get("surprise_pct", "N/A")
+                if sp != "N/A":
+                    se = "🟢" if sp > 0 else "🔴"
+                    L.append(f"    {q['period']}: ${q['actual']} vs 預估${q['estimate']} ({se}{sp:+.1f}%)")
+
+    # ════════════════════════════════════════
+    # 7. SIGNALS DETAIL (量化信號明細)
+    # ════════════════════════════════════════
+    if signals_data:
+        signals = signals_data.get("signals", [])
+        if signals:
+            L.append("")
+            L.append(f"{DIV}")
+            L.append("🧮 *量化信號引擎 (8維度)*")
+            for s in signals:
+                se = {"bullish": "🟢", "bearish": "🔴"}.get(s.get("signal"), "🟡")
+                L.append(f"  {se} {s['name']}: {s.get('reason', '')}")
+
+    # ════════════════════════════════════════
+    # 8. NEWS
+    # ════════════════════════════════════════
+    L.append("")
+    L.append(f"{DIV}")
+    L.append("📰 *新聞*")
 
     if "error" not in tavily_data:
-        ai_summary = tavily_data.get("ai_summary", "")
-        if ai_summary and ai_summary != "無法取得新聞摘要":
-            # 截短摘要
-            summary = ai_summary[:200] + "..." if len(ai_summary) > 200 else ai_summary
-            report_parts.append(f"  {summary}")
-            report_parts.append("")
+        ai_sum = tavily_data.get("ai_summary", "")
+        if ai_sum and ai_sum != "無法取得新聞摘要":
+            summary = ai_sum[:150] + "..." if len(ai_sum) > 150 else ai_sum
+            L.append(f"  {summary}")
 
-        if tavily_data.get("news"):
-            for i, news in enumerate(tavily_data["news"][:3], 1):
-                title = news.get("title", "N/A")
-                url = news.get("url", "#")
-                report_parts.append(f"  {i}. [{title}]({url})")
+        news = tavily_data.get("news", [])
+        if news:
+            for i, n in enumerate(news[:3], 1):
+                title = n.get("title", "N/A")
+                url = n.get("url", "#")
+                L.append(f"  {i}. [{title}]({url})")
         else:
-            report_parts.append("  暫無相關新聞")
+            L.append("  暫無相關新聞")
     else:
-        report_parts.append(f"  ⚠️ {tavily_data.get('error', '新聞不可用')}")
+        L.append(f"  ⚠️ {tavily_data.get('error', '新聞不可用')}")
 
-    # ══ AI 分析 ══
-    report_parts.append("")
-    report_parts.append("══════════════════════════")
-    report_parts.append("🤖 *AI 深度分析*")
-    report_parts.append("══════════════════════════")
-    report_parts.append("")
-    report_parts.append(ai_analysis)
+    # ════════════════════════════════════════
+    # 9. AI ANALYSIS
+    # ════════════════════════════════════════
+    L.append("")
+    L.append(DIV_BOLD)
+    L.append("🤖 *AI 四觀點深度分析*")
+    L.append(DIV_BOLD)
+    L.append("")
+    L.append(ai_analysis)
 
-    # ══ 尾部 ══
+    # ════════════════════════════════════════
+    # FOOTER
+    # ════════════════════════════════════════
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    report_parts.append("")
-    report_parts.append("══════════════════════════")
-    report_parts.append("⚠️ 本報告僅供參考研究，不構成投資建議。")
-    report_parts.append(f"數據來源: Finnhub | yfinance | Tavily | TradingView")
-    report_parts.append(f"📅 {now} | 🛡️ Zero-Hallucination Engine")
+    L.append("")
+    L.append(DIV_BOLD)
+    L.append("⚠️ 僅供參考研究，不構成投資建議。")
+    L.append(f"📅 {now} | 🛡️ Zero-Hallucination Engine v4.2")
 
-    return "\n".join(report_parts)
+    return "\n".join(L)
