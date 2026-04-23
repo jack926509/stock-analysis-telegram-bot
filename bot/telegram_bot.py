@@ -72,22 +72,16 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     welcome_msg = (
         "👋 歡迎使用零幻覺美股分析 Bot!\n"
         "\n"
-        "我會基於真實數據為你分析美股，嚴格排除 AI 幻覺。\n"
+        "📌 指令：\n"
+        "  /report AAPL  — 完整分析報告\n"
+        "  /watchlist — 自選股清單\n"
+        "  /watch AAPL — 加入 / /unwatch 移除\n"
         "\n"
-        "📌 分析指令：\n"
-        "  /report AAPL — 分析 Apple\n"
-        "  /report TSLA — 分析 Tesla\n"
-        "  /report SPY  — 分析 ETF\n"
-        "\n"
-        "📋 自選股指令：\n"
-        "  /watchlist       — 查看自選股清單\n"
-        "  /watch AAPL      — 加入自選股\n"
-        "  /unwatch AAPL    — 移除自選股\n"
-        "\n"
-        "🔍 數據來源：\n"
-        "  Finnhub | yfinance | Tavily | TradingView\n"
-        "\n"
-        "🤖 分析引擎：Anthropic Claude\n"
+        "🔍 10+ 數據源並行抓取\n"
+        "🧮 8 維度量化信號引擎\n"
+        "🏦 分析師·內部人·EPS 驚喜\n"
+        "🌍 VIX·殖利率 宏觀環境\n"
+        "🤖 Claude 四觀點深度分析\n"
         "🛡️ 所有分析僅基於真實數據，零幻覺"
     )
     await update.message.reply_text(welcome_msg)
@@ -468,6 +462,8 @@ def _split_message(text: str, max_length: int = 4096) -> list[str]:
         split_pos = text.rfind("━━━━", 0, max_length)
         if split_pos == -1:
             split_pos = text.rfind("══════", 0, max_length)
+        if split_pos == -1:
+            split_pos = text.rfind("─ ─ ─", 0, max_length)
         if split_pos == -1:
             split_pos = text.rfind("\n\n", 0, max_length)
         if split_pos == -1:
