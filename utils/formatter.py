@@ -198,33 +198,61 @@ def format_report(
         pe_hint = ""
         try:
             if pe != "N/A" and fpe != "N/A":
-                pe_hint = " 📈" if float(fpe) < float(pe) else " 📉"
+                pe_hint = " 📈成長預期" if float(fpe) < float(pe) else " 📉成長放緩"
         except (ValueError, TypeError):
             pass
-        L.append(f"  PE {_num(pe)} → FPE {_num(fpe)}{pe_hint}  PEG {_safe(yf.get('peg_ratio'))}")
-        L.append(f"  EPS ${_safe(yf.get('eps'))}  殖利率 {yf.get('dividend_yield', 'N/A')}")
+        L.append(f"  PE {_num(pe)} → Forward PE {_num(fpe)}{pe_hint}")
+        L.append(f"  PEG {_safe(yf.get('peg_ratio'))}  EPS ${_safe(yf.get('eps'))}  殖利率 {yf.get('dividend_yield', 'N/A')}")
 
-        # 獲利品質 (合併為一行)
+        # 獲利品質
         roe = yf.get("roe", "N/A")
+        roa = yf.get("roa", "N/A")
         margin = yf.get("profit_margin", "N/A")
         op_m = yf.get("operating_margin", "N/A")
         if roe != "N/A" or margin != "N/A":
-            L.append(f"  ROE {roe}  利潤率 {margin}  營業 {op_m}")
+            L.append(f"  ROE {roe}  ROA {roa}")
+            L.append(f"  淨利率 {margin}  營業利潤率 {op_m}")
 
-        # 成長 (合併為一行)
+        # 成長
         rg = yf.get("revenue_growth", "N/A")
         eg = yf.get("earnings_growth", "N/A")
         if rg != "N/A" or eg != "N/A":
-            L.append(f"  營收成長 {rg}  盈餘成長 {eg}")
+            growth_tag = ""
+            try:
+                if rg != "N/A" and eg != "N/A":
+                    rv = float(str(rg).replace("%", ""))
+                    ev = float(str(eg).replace("%", ""))
+                    if rv > 0 and ev > rv:
+                        growth_tag = " (盈餘加速)"
+                    elif rv > 0 and ev < 0:
+                        growth_tag = " ⚠️利潤壓縮"
+            except (ValueError, TypeError):
+                pass
+            L.append(f"  營收成長 {rg}  盈餘成長 {eg}{growth_tag}")
 
-        # 財務健康 (合併為一行)
+        # 財務健康
         fcf = yf.get("free_cash_flow", "N/A")
         de = yf.get("debt_to_equity", "N/A")
         cr = yf.get("current_ratio", "N/A")
         if fcf != "N/A" or de != "N/A":
-            L.append(f"  FCF {fcf}  D/E {_safe(de)}  流動 {_safe(cr)}")
+            de_tag = ""
+            try:
+                if de != "N/A":
+                    dev = float(de)
+                    if dev > 150: de_tag = " ⚠️高槓桿"
+                    elif dev < 50: de_tag = " 低槓桿"
+            except (ValueError, TypeError):
+                pass
+            cr_tag = ""
+            try:
+                if cr != "N/A":
+                    crv = float(cr)
+                    if crv < 1.0: cr_tag = " ⚠️"
+            except (ValueError, TypeError):
+                pass
+            L.append(f"  FCF {fcf}  D/E {_safe(de)}{de_tag}  流動比率 {_safe(cr)}{cr_tag}")
 
-        # 補充估值 (合併為一行)
+        # 補充估值
         ev = yf.get("ev_to_ebitda", "N/A")
         pb = yf.get("price_to_book", "N/A")
         ps = yf.get("price_to_sales", "N/A")
@@ -234,24 +262,43 @@ def format_report(
         # 財報日
         ed = yf.get("earnings_date", "N/A")
         if ed != "N/A":
-            L.append(f"  📅 財報 {ed}{_earnings_countdown(ed)}")
+            L.append(f"  📅 下次財報 {ed}{_earnings_countdown(ed)}")
 
         # 籌碼
         sr = yf.get("short_ratio", "N/A")
         inst = yf.get("held_pct_institutions", "N/A")
         if sr != "N/A" or inst != "N/A":
-            L.append(f"  空頭比 {_safe(sr)}  機構持股 {inst}")
+            sr_tag = ""
+            try:
+                if sr != "N/A" and float(sr) > 5:
+                    sr_tag = " ⚠️偏高"
+            except (ValueError, TypeError):
+                pass
+            L.append(f"  空頭比率 {_safe(sr)}{sr_tag}  機構持股 {inst}")
 
-        # 同業 (內嵌，不再獨立區塊)
+        # 同業比較
         if peer_data and "error" not in peer_data:
+            peer_parts = []
             avg_pe = peer_data.get("sector_avg_pe", "N/A")
             if avg_pe != "N/A" and pe != "N/A":
                 try:
                     diff = ((float(pe) / float(avg_pe)) - 1) * 100
                     tag = "↑偏高" if diff > 10 else ("↓偏低" if diff < -10 else "≈接近")
-                    L.append(f"  vs同業PE {_num(avg_pe)} ({tag})")
+                    peer_parts.append(f"PE {_num(pe)} vs 同業 {_num(avg_pe)}({tag})")
                 except (ValueError, TypeError):
                     pass
+            avg_margin = peer_data.get("sector_avg_profit_margin", "N/A")
+            if avg_margin != "N/A" and margin != "N/A":
+                try:
+                    avg_pct = f"{float(avg_margin) * 100:.1f}%"
+                    peer_parts.append(f"利潤率 {margin} vs {avg_pct}")
+                except (ValueError, TypeError):
+                    pass
+            if peer_parts:
+                peers_str = ", ".join(peer_data.get("peers", [])[:4])
+                L.append(f"  vs同業({peers_str})")
+                for pp in peer_parts:
+                    L.append(f"    {pp}")
     else:
         L.append(f"  ⚠️ {yf.get('error', '基本面不可用')}")
 
@@ -340,17 +387,14 @@ def format_report(
                     pass
                 L.append(f"  量能 {vol} / 均量 {avg_vol}{vol_tag}")
 
-        # 支撐壓力 (內嵌)
+        # 支撐壓力
         if history_data and "error" not in history_data:
             sr = history_data.get("support_resistance", {})
             if sr:
-                parts = []
-                if "support_20d" in sr:
-                    parts.append(f"支撐${_num(sr['support_20d'])}")
-                if "resistance_20d" in sr:
-                    parts.append(f"壓力${_num(sr['resistance_20d'])}")
-                if parts:
-                    L.append(f"  關鍵位 {' / '.join(parts)}")
+                if "support_20d" in sr and "resistance_20d" in sr:
+                    L.append(f"  短期: 支撐 ${_num(sr['support_20d'])} / 壓力 ${_num(sr['resistance_20d'])}")
+                if "support_60d" in sr and "resistance_60d" in sr:
+                    L.append(f"  中期: 支撐 ${_num(sr['support_60d'])} / 壓力 ${_num(sr['resistance_60d'])}")
     else:
         L.append(f"  ⚠️ {tv.get('error', '技術面不可用')}")
 
@@ -368,37 +412,32 @@ def format_report(
         if has_hist:
             r7 = _ret(history_data.get("return_7d"))
             r30 = _ret(history_data.get("return_30d"))
+            r60 = _ret(history_data.get("return_60d"))
             r90 = _ret(history_data.get("return_90d"))
-            L.append(f"  7d {r7}  30d {r30}  90d {r90}")
+            L.append(f"  報酬率: 7d {r7}  30d {r30}")
+            L.append(f"          60d {r60}  90d {r90}")
 
             vol30 = history_data.get("volatility_30d", "N/A")
             if vol30 != "N/A":
                 try:
-                    vl = "⚠️高" if float(vol30) > 40 else ("中" if float(vol30) > 20 else "低")
-                    L.append(f"  波動率 {vol30}%({vl})")
+                    v = float(vol30)
+                    vl = "⚠️高風險" if v > 40 else ("中等" if v > 20 else "低風險")
+                    L.append(f"  30日年化波動率 {vol30}% ({vl})")
                 except (ValueError, TypeError):
                     pass
 
             a30 = history_data.get("alpha_vs_spy_30d", "N/A")
             a90 = history_data.get("alpha_vs_spy_90d", "N/A")
-            if a30 != "N/A":
-                ae = "🟢" if float(a30) >= 0 else "🔴"
-                spy30 = history_data.get("spy_return_30d", "N/A")
-                alpha_line = f"  vs SPY {ae} 30d Alpha {a30:+.1f}%"
+            if a30 != "N/A" or a90 != "N/A":
+                L.append("  vs SPY 大盤:")
+                if a30 != "N/A":
+                    ae = "🟢 跑贏" if float(a30) >= 0 else "🔴 跑輸"
+                    spy30 = history_data.get("spy_return_30d", "N/A")
+                    L.append(f"    30d Alpha {a30:+.1f}% ({ae})  SPY {spy30}%")
                 if a90 != "N/A":
-                    ae9 = "🟢" if float(a90) >= 0 else "🔴"
-                    alpha_line += f"  {ae9} 90d {a90:+.1f}%"
-                L.append(alpha_line)
-
-            # 量能趨勢
-            vt = history_data.get("volume_trend", "N/A")
-            if vt != "N/A":
-                try:
-                    vtf = float(vt)
-                    vt_tag = "↑放量" if vtf >= 1.2 else ("↓縮量" if vtf <= 0.8 else "→持平")
-                    L.append(f"  5d/20d量比 {vtf:.2f} {vt_tag}")
-                except (ValueError, TypeError):
-                    pass
+                    ae9 = "🟢 跑贏" if float(a90) >= 0 else "🔴 跑輸"
+                    spy90 = history_data.get("spy_return_90d", "N/A")
+                    L.append(f"    90d Alpha {a90:+.1f}% ({ae9})  SPY {spy90}%")
 
         if has_macro:
             vix = macro_data.get("vix", "N/A")
@@ -456,32 +495,33 @@ def format_report(
             total_tx = insider_data.get("total_transactions", 0)
             if total_tx > 0:
                 sent = insider_data.get("net_sentiment", "neutral")
+                sent_cn = {"bullish": "偏多（內部人淨買入）", "bearish": "偏空（內部人淨賣出）"}.get(sent, "中性")
                 ie = {"bullish": "🟢", "bearish": "🔴"}.get(sent, "🟡")
                 bc = insider_data.get("buy_count", 0)
                 sc = insider_data.get("sell_count", 0)
-                L.append(f"  {ie} 內部人 {sent}  買{bc}/賣{sc}筆(90天)")
+                bv = insider_data.get("buy_value", 0)
+                sv = insider_data.get("sell_value", 0)
+                L.append(f"  {ie} 內部人動向: {sent_cn}")
+                L.append(f"    買入 {bc}筆(${_num(bv, 0)}) / 賣出 {sc}筆(${_num(sv, 0)})")
 
                 notable = insider_data.get("notable_transactions", [])
-                if notable:
-                    tx = notable[0]
-                    L.append(f"    最大: {tx['type']} {tx['name']} ${_num(tx['value_usd'], 0)}")
+                for tx in notable[:3]:
+                    L.append(f"    {tx['type']} {tx['name']} ${_num(tx['value_usd'], 0)} ({tx['date']})")
 
         if has_eps:
             track = earnings_data.get("track_record", "N/A")
             beat = earnings_data.get("beat_count", 0)
+            miss = earnings_data.get("miss_count", 0)
             total_q = earnings_data.get("total_quarters", 0)
             te = {"excellent": "🟢", "good": "🟢", "poor": "🔴", "mixed": "🟡"}.get(track, "⚪")
-            L.append(f"  {te} EPS紀錄 {track} (Beat {beat}/{total_q}季)")
+            L.append(f"  {te} EPS 歷史紀錄: {beat}/{total_q} 季超預期")
 
             quarters = earnings_data.get("quarters", [])
-            if quarters:
-                q_parts = []
-                for q in quarters[:4]:
-                    sp = q.get("surprise_pct", "N/A")
-                    if sp != "N/A":
-                        q_parts.append(f"{'✓' if sp > 0 else '✗'}{sp:+.0f}%")
-                if q_parts:
-                    L.append(f"    近4季: {' | '.join(q_parts)}")
+            for q in quarters[:4]:
+                sp = q.get("surprise_pct", "N/A")
+                if sp != "N/A":
+                    se = "🟢" if sp > 0 else "🔴"
+                    L.append(f"    {q['period']}: ${q['actual']} vs 預估${q['estimate']} ({se}{sp:+.1f}%)")
 
     # ════════════════════════════════════════
     # 7. SIGNALS DETAIL (量化信號明細)
@@ -491,13 +531,10 @@ def format_report(
         if signals:
             L.append("")
             L.append(f"{DIV}")
-            L.append("🧮 *量化信號明細*")
+            L.append("🧮 *量化信號引擎 (8維度)*")
             for s in signals:
                 se = {"bullish": "🟢", "bearish": "🔴"}.get(s.get("signal"), "🟡")
-                reason = s.get("reason", "")
-                if len(reason) > 40:
-                    reason = reason[:37] + "..."
-                L.append(f"  {se} {s['name']}: {reason}")
+                L.append(f"  {se} {s['name']}: {s.get('reason', '')}")
 
     # ════════════════════════════════════════
     # 8. NEWS
