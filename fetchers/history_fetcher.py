@@ -81,6 +81,14 @@ async def fetch_history_analysis(ticker: str) -> dict:
         else:
             result["volume_trend"] = "N/A"
 
+        # ── 相對強弱 vs SPY（Alpha 判斷核心）──
+        if ticker.upper() != "SPY":
+            try:
+                spy_rel = await _fetch_relative_strength(ticker, closes)
+                result.update(spy_rel)
+            except Exception:
+                result["relative_strength_vs_spy"] = "N/A"
+
         return result
 
     except Exception as e:
@@ -88,6 +96,43 @@ async def fetch_history_analysis(ticker: str) -> dict:
             "source": "yfinance_history",
             "error": f"歷史數據錯誤: {str(e)}",
         }
+
+
+async def _fetch_relative_strength(ticker: str, stock_closes: np.ndarray) -> dict:
+    """
+    計算個股 vs SPY 的相對強弱。
+    華爾街分析師核心指標：跑贏大盤 = 有 Alpha。
+    """
+    try:
+        spy = yf.Ticker("SPY")
+        spy_hist = await asyncio.to_thread(
+            lambda: spy.history(period="1y", interval="1d")
+        )
+
+        if spy_hist is None or spy_hist.empty:
+            return {"relative_strength_vs_spy": "N/A"}
+
+        spy_closes = spy_hist["Close"].values
+
+        result = {}
+        # 確保兩者長度對齊（取較短的）
+        min_len = min(len(stock_closes), len(spy_closes))
+
+        for days, label in [(30, "30d"), (90, "90d")]:
+            if min_len > days:
+                stock_ret = (float(stock_closes[-1]) - float(stock_closes[-(days + 1)])) / float(stock_closes[-(days + 1)]) * 100
+                spy_ret = (float(spy_closes[-1]) - float(spy_closes[-(days + 1)])) / float(spy_closes[-(days + 1)]) * 100
+                alpha = round(stock_ret - spy_ret, 2)
+                result[f"alpha_vs_spy_{label}"] = alpha
+                result[f"spy_return_{label}"] = round(spy_ret, 2)
+            else:
+                result[f"alpha_vs_spy_{label}"] = "N/A"
+                result[f"spy_return_{label}"] = "N/A"
+
+        return result
+
+    except Exception:
+        return {"relative_strength_vs_spy": "N/A"}
 
 
 def _calc_support_resistance(

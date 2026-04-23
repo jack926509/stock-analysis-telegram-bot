@@ -37,11 +37,17 @@ async def fetch_tavily_news(ticker: str, company_name: str = "") -> dict:
     try:
         client = _get_client()
 
-        # 優化搜尋查詢：加入公司全名提高精確度
+        # 優化搜尋查詢：聚焦催化劑型新聞（財報、產品、監管、併購）
         if company_name and company_name != "N/A":
-            query = f"{company_name} ({ticker}) stock latest news financial analysis"
+            query = (
+                f"{company_name} ({ticker}) stock earnings revenue guidance "
+                f"analyst upgrade downgrade catalyst news"
+            )
         else:
-            query = f"{ticker} stock latest news financial analysis"
+            query = (
+                f"{ticker} stock earnings revenue analyst "
+                f"upgrade downgrade catalyst news"
+            )
 
         response = await retry_async_call(
             asyncio.to_thread,
@@ -50,6 +56,8 @@ async def fetch_tavily_news(ticker: str, company_name: str = "") -> dict:
                 search_depth="advanced",
                 include_answer=True,
                 max_results=5,
+                topic="news",
+                days=7,
             ),
             source_name="Tavily",
         )

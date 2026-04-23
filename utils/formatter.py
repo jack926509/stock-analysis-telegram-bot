@@ -306,6 +306,20 @@ def _format_history_section(history_data: dict) -> list[str]:
         vol_label = "⚠️偏高" if float(vol) > 40 else ("中等" if float(vol) > 20 else "低")
         lines.append(f"  30日年化波動: {vol}% ({vol_label})")
 
+    # 相對強弱 vs SPY
+    alpha_30 = history_data.get("alpha_vs_spy_30d", "N/A")
+    alpha_90 = history_data.get("alpha_vs_spy_90d", "N/A")
+    if alpha_30 != "N/A" or alpha_90 != "N/A":
+        lines.append("  vs SPY:")
+        if alpha_30 != "N/A":
+            spy_30 = history_data.get("spy_return_30d", "N/A")
+            emoji_30 = "🟢" if float(alpha_30) >= 0 else "🔴"
+            lines.append(f"    30日 Alpha: {emoji_30} {alpha_30:+.2f}%  (SPY: {spy_30}%)")
+        if alpha_90 != "N/A":
+            spy_90 = history_data.get("spy_return_90d", "N/A")
+            emoji_90 = "🟢" if float(alpha_90) >= 0 else "🔴"
+            lines.append(f"    90日 Alpha: {emoji_90} {alpha_90:+.2f}%  (SPY: {spy_90}%)")
+
     return lines
 
 
@@ -453,11 +467,32 @@ def format_report(
         report_parts.append(f"  殖利率: {yfinance_data.get('dividend_yield', 'N/A')}  "
                            f"利潤率: {yfinance_data.get('profit_margin', 'N/A')}")
 
+        # 獲利能力
+        roe = yfinance_data.get("roe", "N/A")
+        roa = yfinance_data.get("roa", "N/A")
+        op_margin = yfinance_data.get("operating_margin", "N/A")
+        if roe != "N/A" or roa != "N/A":
+            report_parts.append(f"  ROE: {roe}  ROA: {roa}  營業利潤率: {op_margin}")
+
         # 成長指標
         rev_growth = yfinance_data.get("revenue_growth", "N/A")
         earn_growth = yfinance_data.get("earnings_growth", "N/A")
         if rev_growth != "N/A" or earn_growth != "N/A":
             report_parts.append(f"  營收成長: {rev_growth}  盈餘成長: {earn_growth}")
+
+        # 現金流與財務健康
+        fcf = yfinance_data.get("free_cash_flow", "N/A")
+        de = yfinance_data.get("debt_to_equity", "N/A")
+        if fcf != "N/A" or de != "N/A":
+            cr = yfinance_data.get("current_ratio", "N/A")
+            report_parts.append(f"  FCF: {fcf}  D/E: {_safe_value(de)}  流動比率: {_safe_value(cr)}")
+
+        # 估值補充
+        ev_ebitda = yfinance_data.get("ev_to_ebitda", "N/A")
+        pb = yfinance_data.get("price_to_book", "N/A")
+        ps = yfinance_data.get("price_to_sales", "N/A")
+        if ev_ebitda != "N/A" or pb != "N/A":
+            report_parts.append(f"  EV/EBITDA: {_safe_value(ev_ebitda)}  P/B: {_safe_value(pb)}  P/S: {_safe_value(ps)}")
 
         # 財報日期
         earnings_date = yfinance_data.get("earnings_date", "N/A")

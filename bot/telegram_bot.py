@@ -25,7 +25,7 @@ from fetchers.tavily_fetcher import fetch_tavily_news
 from fetchers.tradingview_fetcher import fetch_tradingview_analysis
 from fetchers.history_fetcher import fetch_history_analysis
 from fetchers.peer_fetcher import fetch_peer_comparison
-from analyzer.openai_analyzer import analyze_stock
+from analyzer.anthropic_analyzer import analyze_stock
 from utils.formatter import format_report
 from utils.cache import raw_cache, report_cache
 from utils.chart import generate_chart
@@ -82,7 +82,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "🔍 數據來源：\n"
         "  Finnhub | yfinance | Tavily | TradingView\n"
         "\n"
-        "🤖 分析引擎：OpenAI GPT\n"
+        "🤖 分析引擎：Anthropic Claude\n"
         "🛡️ 所有分析僅基於真實數據，零幻覺"
     )
     await update.message.reply_text(welcome_msg)

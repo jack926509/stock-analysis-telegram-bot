@@ -106,7 +106,7 @@ def main():
 
     # 啟動 Bot
     logger.info("🚀 正在啟動零幻覺美股分析 Bot...")
-    logger.info(f"📦 AI 模型: {Config.OPENAI_MODEL}")
+    logger.info(f"📦 AI 模型: {Config.ANTHROPIC_MODEL}")
     logger.info(f"🌍 環境: {Config.ENV}")
     logger.info(f"📡 模式: {Config.BOT_MODE}")
 
@@ -130,7 +130,7 @@ def _run_polling_with_health():
     app = create_bot_application()
 
     async def _post_init(application):
-        """Bot 啟動後的 hook，用來啟動健康檢查。"""
+        """Bot 啟動後的 hook，用來啟動健康檢查 + 日報生成。"""
         try:
             from utils.health import start_health_server
             application.bot_data["health_runner"] = await start_health_server(
@@ -138,6 +138,10 @@ def _run_polling_with_health():
             )
         except Exception as e:
             logger.warning(f"⚠️ 健康檢查啟動失敗: {e}")
+
+        # 啟動時觸發日報生成（非阻塞）
+        if Config.NEWSLETTER_ENABLED:
+            asyncio.create_task(_run_newsletter_on_startup())
 
     async def _post_shutdown(application):
         """Bot 關閉後的 hook，用來關閉健康檢查。"""
@@ -153,6 +157,21 @@ def _run_polling_with_health():
     logger.info("✅ Bot 已啟動！等待指令中...")
     logger.info("📌 可用指令: /start, /report, /watchlist, /watch, /unwatch")
     app.run_polling(drop_pending_updates=True)
+
+
+async def _run_newsletter_on_startup():
+    """啟動時非同步執行日報生成。"""
+    logger = logging.getLogger("newsletter")
+    try:
+        from app.pipeline import run_newsletter_pipeline
+        logger.info("📰 啟動時觸發日報生成...")
+        newsletter = await run_newsletter_pipeline()
+        if newsletter:
+            logger.info(f"✅ 日報生成成功（{len(newsletter)} 字）")
+        else:
+            logger.warning("⚠️ 日報生成返回空結果")
+    except Exception as e:
+        logger.error(f"❌ 日報生成失敗: {e}", exc_info=True)
 
 
 if __name__ == "__main__":

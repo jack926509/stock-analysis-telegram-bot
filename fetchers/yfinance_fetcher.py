@@ -63,25 +63,24 @@ def _format_percentage(value) -> str:
         return "N/A"
 
 
-def _extract_earnings_date(info: dict) -> str:
-    """從 yfinance info 提取下次財報日期。"""
+def _format_earnings_date(info: dict) -> str:
+    """從 yfinance info 中取得下次財報日期。"""
     try:
-        # earningsTimestamp (Unix) or earningsDate (list of Timestamps)
-        ts = info.get("earningsTimestamp")
-        if ts:
-            from datetime import datetime, timezone
-            dt = datetime.fromtimestamp(ts, tz=timezone.utc)
-            return dt.strftime("%Y-%m-%d")
-
-        dates = info.get("earningsDate")
-        if dates and len(dates) > 0:
-            d = dates[0]
-            if hasattr(d, "strftime"):
-                return d.strftime("%Y-%m-%d")
-            return str(d)[:10]
-    except Exception:
-        pass
-    return "N/A"
+        from datetime import datetime, timezone
+        for key in ("earningsTimestamp", "earningsDate", "nextEarningsDate"):
+            val = info.get(key)
+            if val is None:
+                continue
+            if isinstance(val, (list, tuple)) and len(val) > 0:
+                val = val[0]
+            if isinstance(val, (int, float)):
+                dt = datetime.fromtimestamp(int(val), tz=timezone.utc)
+                return dt.strftime("%Y-%m-%d")
+            if isinstance(val, str) and val:
+                return val
+        return "N/A"
+    except (ValueError, TypeError, OSError):
+        return "N/A"
 
 
 async def fetch_yfinance_fundamentals(ticker: str) -> dict:
@@ -153,8 +152,26 @@ async def fetch_yfinance_fundamentals(ticker: str) -> dict:
             "held_pct_institutions": _format_percentage(info.get("heldPercentInstitutions")),
             # 營收
             "revenue": _format_large_number(info.get("totalRevenue")),
+            # 獲利能力指標（華爾街核心）
+            "roe": _format_percentage(info.get("returnOnEquity")),
+            "roa": _format_percentage(info.get("returnOnAssets")),
+            "operating_margin": _format_percentage(info.get("operatingMargins")),
+            "gross_margin": _format_percentage(info.get("grossMargins")),
+            # 現金流（巴菲特最重視的指標）
+            "free_cash_flow": _format_large_number(info.get("freeCashflow")),
+            "operating_cash_flow": _format_large_number(info.get("operatingCashflow")),
+            # 財務健康度
+            "debt_to_equity": _safe_get(info, "debtToEquity"),
+            "current_ratio": _safe_get(info, "currentRatio"),
+            "total_debt": _format_large_number(info.get("totalDebt")),
+            "total_cash": _format_large_number(info.get("totalCash")),
+            # 估值補充
+            "price_to_book": _safe_get(info, "priceToBook"),
+            "price_to_sales": _safe_get(info, "priceToSalesTrailing12Months"),
+            "enterprise_value": _format_large_number(info.get("enterpriseValue")),
+            "ev_to_ebitda": _safe_get(info, "enterpriseToEbitda"),
             # 財報日期
-            "earnings_date": _extract_earnings_date(info),
+            "earnings_date": _format_earnings_date(info),
             # 公司簡介
             "business_summary": (
                 info.get("longBusinessSummary", "N/A")[:300] + "..."
