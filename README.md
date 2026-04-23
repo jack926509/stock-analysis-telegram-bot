@@ -1,386 +1,380 @@
+<div align="center">
+
 # 🛡️ 零幻覺美股 Telegram 分析機器人
 
-> **Zero-Hallucination US Stock Analysis Telegram Bot**
+**Zero-Hallucination US Stock Analysis Telegram Bot**
 
-一個基於 **RAG（檢索增強生成）** 架構的 Telegram Bot，完全基於真實數據進行邏輯推演，嚴格排除 AI 幻覺。
+基於 RAG + 12 維度量化信號引擎 + Anthropic Claude 四觀點分析  
+所有論點皆需真實數據佐證，嚴格排除 AI 幻覺
 
-[![Python](https://img.shields.io/badge/Python-3.9+-blue?logo=python&logoColor=white)](https://www.python.org/)
+[![Python 3.10+](https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![Telegram Bot](https://img.shields.io/badge/Telegram-Bot-26A5E4?logo=telegram&logoColor=white)](https://core.telegram.org/bots)
-[![Anthropic](https://img.shields.io/badge/Anthropic-Claude-D97757?logo=anthropic&logoColor=white)](https://www.anthropic.com/)
+[![Anthropic Claude](https://img.shields.io/badge/Anthropic-Claude_Sonnet_4-D97757?logo=anthropic&logoColor=white)](https://www.anthropic.com/)
 [![Deploy on Zeabur](https://img.shields.io/badge/Deploy-Zeabur-7B61FF?logo=zeabur&logoColor=white)](https://zeabur.com/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+[快速開始](#-快速開始) · [指令](#-指令) · [12 維信號引擎](#-12-維度量化信號引擎) · [架構](#-系統架構) · [部署](#️-zeabur-部署) · [更新記錄](#-修改歷程)
+
+</div>
 
 ---
 
-## ✨ 功能特色
+## ✨ 特色
 
-- 🔍 **多源數據整合** — 並行抓取 6 大數據源（即時股價、基本面、技術指標、新聞、歷史回測、同業比較）
-- 🛡️ **反幻覺機制** — 四層防護確保 AI 分析 100% 基於真實數據
-- ⚡ **非同步並行** — 使用 `asyncio.gather()` 並行抓取，大幅降低響應延遲
-- 📊 **美觀報告** — 結構化 Markdown 報告，原始數據 + AI 分析一目瞭然
-- 🧠 **深度分析** — 基本面、技術面、量能、籌碼面、歷史回測、同業比較、市場情緒七維度交叉驗證
-- 📋 **自選股清單** — 個人化追蹤清單，快速查閱常用標的
-- 🔒 **ETF 支援** — 支援 SPY、QQQ 等 ETF 分析
-- 📈 **K 線圖** — 自動生成 60 日 K 線圖（MA5/MA20/MA60）以圖片發送
-- 🏥 **健康監控** — HTTP `/health` 端點，支援 Zeabur 服務監控
+- 🔍 **10+ 數據源並行** — Finnhub · FMP · yfinance · TradingView · Tavily · 宏觀 · 分析師 · 內部人 · EPS
+- 🧮 **12 維度量化信號** — 純 Python 規則引擎，獨立於 LLM 的「確定性」共識
+- 🤖 **Claude 四觀點深度分析** — 價值 / 成長 / 技術 / 風險，Prompt Caching 啟用
+- 🛡️ **反幻覺四層防護** — 缺失即標 `N/A`，原始數據與 AI 分析同步展示供交叉驗證
+- 📈 **K 線圖 + 互動按鈕** — 60 日 MA5/20/60、「加入自選股 / 重新分析」InlineKeyboard
+- ⚡ **非同步 + LRU 快取** — `asyncio.gather` 並行、raw 30 分 / report 5 分雙層快取
+- 🏥 **生產級穩定性** — 健康檢查、Rate Limiting、Graceful Shutdown、FMP↔yfinance Fallback
+
+---
+
+## 🚀 快速開始
+
+### 1 · 取得 API Keys
+
+| Key | 取得位置 | 費用 |
+|---|---|---|
+| `TELEGRAM_BOT_TOKEN` | [@BotFather](https://t.me/BotFather) | 免費 |
+| `FINNHUB_API_KEY` | [finnhub.io](https://finnhub.io/) | 免費方案 |
+| `FMP_API_KEY` | [financialmodelingprep.com](https://financialmodelingprep.com/) | 免費 250 次/日 |
+| `TAVILY_API_KEY` | [tavily.com](https://tavily.com/) | 免費方案 |
+| `ANTHROPIC_API_KEY` | [console.anthropic.com](https://console.anthropic.com/) | 按量計費 |
+
+> 💡 `yfinance` 與 `tradingview-ta` 無需 API Key。
+
+### 2 · 本地啟動
+
+> ⚠️ **需要 Python 3.10 以上**（使用 PEP 604 聯合型別語法）
+
+```bash
+git clone https://github.com/jack926509/stock-analysis-telegram-bot.git
+cd stock-analysis-telegram-bot
+
+python3.10 -m venv venv
+source venv/bin/activate        # macOS/Linux
+# venv\Scripts\activate         # Windows
+
+pip install -r requirements.txt
+
+cp .env.example .env            # 填入上面的 API Keys
+python main.py
+```
+
+### 3 · Zeabur 一鍵部署
+
+1. [Zeabur](https://zeabur.com/) → New Project → Import from GitHub
+2. 選擇此 repo，在 **Variables** 頁填入必要 API Keys（見[環境變數](#️-環境變數)）
+3. Deploy — `zbpack.json` 已預先設好建構與啟動指令
+
+---
+
+## 💬 指令
+
+### 🔍 分析
+
+| 指令 | 功能 | 範例 |
+|---|---|---|
+| `/report TICKER` | 完整深度分析（12 信號 + Claude AI） | `/report AAPL` |
+| `/chart TICKER` | 僅 60 日 K 線圖（秒回，省 Claude 費用） | `/chart TSLA` |
+| `/compare T1 T2 …` | 並排對比 2–5 檔個股 | `/compare AAPL MSFT NVDA` |
+
+### 📋 自選股管理
+
+| 指令 | 功能 |
+|---|---|
+| `/watchlist` | 自選股清單 + 即時報價 |
+| `/scan` | 批次快掃（報價 + 技術共識 + RSI） |
+| `/watch TICKER` | 加入自選股 |
+| `/unwatch TICKER` | 移除自選股 |
+
+### 🧭 其他
+
+| 指令 | 功能 |
+|---|---|
+| `/start` | 歡迎訊息 |
+| `/help` | 完整指令手冊 |
+
+---
+
+## 🧮 12 維度量化信號引擎
+
+純 Python 規則引擎，獨立於 AI 層產出「確定性」多空共識，交由 Claude 做最後的交叉驗證與解讀。
+
+| 類別 | 信號 | 權重 | 觸發條件範例 |
+|---|---|---:|---|
+| **基本面** | 獲利能力 | 12% | ROE > 15% · 利潤率 > 20% |
+| | 成長動能 | 8% | 營收 / 盈餘成長 > 10% |
+| | 財務健康 | 8% | D/E < 50 · 流動比 > 1.5 · FCF > 0 |
+| | 估值 | 12% | PE < 15 · PEG < 1 · 低於同業 20% |
+| **技術面** | 趨勢 | 12% | 完美多頭 (P > EMA20 > SMA50 > SMA200) |
+| | 動量 | 10% | RSI 超賣反彈 · MACD 金叉 |
+| | 波動率 | 3% | 年化波動 < 20% 加分 |
+| | 市場情緒 | 10% | TV 買入 > 65% · 分析師共識 |
+| **Smart Money** | 內部人動向 | 8% | 近 90 天淨買入 > 賣出 1.5× |
+| | EPS 紀錄 | 7% | 連 4 季超預期 |
+| **宏觀** | 宏觀環境 | 5% | VIX < 20 且 10Y < 4% = risk-on |
+| | 相對強弱 | 5% | 30d & 90d Alpha vs SPY 同時 > 0 |
+
+**共識判定**：加權分數 > 0.2 → 🟢 BULLISH · < −0.2 → 🔴 BEARISH · 中間 → 🟡 NEUTRAL  
+**信心度** = `max(多頭數, 空頭數) / 總信號數 × 100%`
+
+---
+
+## 🛡️ 反幻覺四層防護
+
+| 層 | 機制 |
+|---|---|
+| **① 數據層** | 每欄位獨立驗證，缺失即標 `N/A`，禁止推測填充 |
+| **② Prompt 層** | System Prompt 嚴格約束「只使用 Context 數據」，Prompt Caching 確保一致性 |
+| **③ Context 層** | 結構化 JSON 注入、標明來源，AI 無法憑空編造 |
+| **④ 輸出層** | 原始數據與 AI 分析同步展示，使用者可交叉驗證每項判斷 |
 
 ---
 
 ## 📐 系統架構
 
 ```
-使用者 ──▶ Telegram Bot ──▶ Rate Limiter ──▶ 數據檢索層 (並行)  ──▶ AI 分析層 ──▶ 格式化報告
-                                               ├── Finnhub     (即時股價)
-                                               ├── yfinance    (基本面)
-                                               ├── TradingView (技術指標)
-                                               ├── Tavily      (真實新聞)
-                                               ├── yfinance    (歷史回測)
-                                               └── yfinance    (同業比較)
+使用者 ─▶ /report AAPL
+           │
+           ▼
+┌─────────────────────────────────────────────┐
+│ 📡 10+ 數據源並行抓取（asyncio.gather）       │
+│   Finnhub · FMP · yfinance · TradingView     │
+│   Tavily · History · Peer · Analyst          │
+│   Insider · EPS · Macro(VIX/10Y)             │
+└─────────────────────────────────────────────┘
+           │
+           ▼
+┌─────────────────────────────────────────────┐
+│ 🧮 12 維度量化信號引擎（純規則）              │
+│   基本面 4 · 技術面 4 · Smart Money 2         │
+│   宏觀 2 → 加權共識                           │
+└─────────────────────────────────────────────┘
+           │
+           ▼
+┌─────────────────────────────────────────────┐
+│ 🤖 Claude 四觀點深度分析                      │
+│   價值 · 成長 · 技術 · 風險管理               │
+│   (Prompt Caching · temperature=0.3)         │
+└─────────────────────────────────────────────┘
+           │
+           ▼
+┌─────────────────────────────────────────────┐
+│ 📊 HTML 報告 + 📈 K 線圖 + 🎮 互動按鈕        │
+└─────────────────────────────────────────────┘
 ```
-
-### 反幻覺四層防護
-
-| 層級 | 措施 |
-|------|------|
-| **① 數據層** | 每個欄位獨立驗證，缺失即標 `N/A`，不做任何推測填充 |
-| **② Prompt 層** | System Prompt 嚴格約束 AI 只能使用提供的 Context 數據 |
-| **③ Context 層** | 數據以結構化 JSON 注入，標明來源，AI 無法憑空編造 |
-| **④ 輸出層** | 報告同時展示「原始數據」與「AI 分析」，使用者可交叉驗證 |
 
 ---
 
 ## 📁 專案結構
 
 ```
-stock_bot_project/
-├── main.py                    # 程式進入點（Graceful Shutdown + 健康檢查）
-├── config.py                  # 設定管理（多環境支援）
-├── requirements.txt           # Python 套件清單
-├── .env.example               # 環境變數範本
-├── Procfile                   # Zeabur 部署設定
-├── zbpack.json                # Zeabur 建構設定
-├── fetchers/                  # 📡 數據檢索層
-│   ├── finnhub_fetcher.py     #   即時股價 (Finnhub API)
-│   ├── yfinance_fetcher.py    #   基本面數據 (yfinance)
-│   ├── tavily_fetcher.py      #   真實新聞 (Tavily Search)
-│   ├── tradingview_fetcher.py #   技術指標 (TradingView-TA)
-│   ├── history_fetcher.py     #   歷史回測 + 支撐壓力位
-│   └── peer_fetcher.py        #   同業比較
-├── analyzer/                  # 🤖 AI 分析層
-│   └── anthropic_analyzer.py  #   Anthropic Claude 分析引擎
-├── bot/                       # 💬 Telegram 介面層
-│   └── telegram_bot.py        #   Bot 指令處理
-└── utils/                     # 🔧 工具模組
-    ├── formatter.py           #   報告格式化
-    ├── chart.py               #   K 線圖生成 (mplfinance)
-    ├── cache.py               #   分層 LRU 快取
-    ├── retry.py               #   API 指數退避重試
-    ├── database.py            #   SQLite 資料庫（自選股 + 查詢歷史）
-    ├── rate_limiter.py        #   Per-user 請求限制
-    └── health.py              #   HTTP 健康檢查端點
+stock-analysis-telegram-bot/
+├── main.py                  # 進入點（polling / webhook + Graceful Shutdown）
+├── config.py                # 環境變數管理
+├── requirements.txt         # 依賴清單（需 Python 3.10+）
+├── Procfile · zbpack.json   # Zeabur 部署設定
+│
+├── fetchers/                # 📡 並行抓取層
+│   ├── finnhub_fetcher.py              # 即時股價
+│   ├── fmp_fetcher.py                  # 基本面（主）+ 批次報價
+│   ├── yfinance_fetcher.py             # 基本面（備援）
+│   ├── tavily_fetcher.py               # 新聞搜尋
+│   ├── tradingview_fetcher.py          # 技術指標
+│   ├── history_fetcher.py              # 歷史回測 + 支撐壓力 + Alpha
+│   ├── peer_fetcher.py                 # 同業比較
+│   ├── analyst_fetcher.py              # 分析師評級 + 目標價
+│   ├── insider_fetcher.py              # 內部人交易
+│   ├── earnings_surprise_fetcher.py    # EPS 驚喜紀錄
+│   └── macro_fetcher.py                # VIX / 10Y / risk regime
+│
+├── analyzer/
+│   └── anthropic_analyzer.py           # 🤖 Claude 四觀點分析
+│
+├── app/                     # 📰 Newsletter 管線
+│   ├── pipeline.py
+│   └── ai/{planner,writer}.py
+│
+├── bot/
+│   └── telegram_bot.py                 # 💬 指令 + 回調 + HTML parse mode
+│
+└── utils/
+    ├── ai_client.py                    # 🧩 Anthropic 共用 client + Prompt Caching
+    ├── signals.py                      # 🧮 12 維度量化信號引擎
+    ├── formatter.py                    # 🎨 HTML 報告組裝
+    ├── chart.py                        # 📈 mplfinance K 線圖
+    ├── cache.py                        # 💾 LRU 分層快取（raw 30m / report 5m）
+    ├── retry.py                        # 🔁 指數退避重試
+    ├── database.py                     # 🗃 SQLite 自選股 + 查詢歷史
+    ├── rate_limiter.py                 # ⏱ 滑動窗口 per-user 限流
+    └── health.py                       # 🏥 HTTP /health 端點
 ```
 
 ---
 
-## 🚀 快速開始
+## ⚙️ 環境變數
 
-### 1. 取得 API Keys
+<details open>
+<summary><b>必要</b></summary>
 
-| Key | 取得方式 | 費用 |
-|-----|---------|------|
-| `TELEGRAM_BOT_TOKEN` | [@BotFather](https://t.me/BotFather) 建立 Bot | 免費 |
-| `FINNHUB_API_KEY` | [finnhub.io](https://finnhub.io/) 註冊 | 免費方案 |
-| `TAVILY_API_KEY` | [tavily.com](https://tavily.com/) 註冊 | 免費方案 |
-| `ANTHROPIC_API_KEY` | [console.anthropic.com](https://console.anthropic.com/) | 按量計費 |
+| 變數 | 說明 |
+|---|---|
+| `TELEGRAM_BOT_TOKEN` | BotFather 提供的 Bot Token |
+| `FINNHUB_API_KEY` | Finnhub 即時股價 API |
+| `FMP_API_KEY` | Financial Modeling Prep 基本面 API |
+| `TAVILY_API_KEY` | Tavily 新聞搜尋 API |
+| `ANTHROPIC_API_KEY` | Anthropic Claude API |
 
-> 💡 yfinance 和 TradingView-TA 不需要 API Key，直接免費使用。
+</details>
 
-### 2. 本地安裝
+<details>
+<summary><b>選用</b></summary>
 
-```bash
-# Clone 專案
-git clone https://github.com/jack926509/stock-analysis-telegram-bot.git
-cd stock-analysis-telegram-bot
+| 變數 | 預設 | 說明 |
+|---|---|---|
+| `APP_ENV` | `production` | `dev` / `staging` / `production`（影響 log 格式） |
+| `BOT_MODE` | `polling` | `polling` / `webhook` |
+| `WEBHOOK_URL` | — | webhook 模式必填 |
+| `ANTHROPIC_MODEL` | `claude-sonnet-4-6` | 可選 opus / haiku |
+| `HEALTH_ENABLED` | `true` | `/health` HTTP 端點開關 |
+| `HEALTH_PORT` | `8080` | HTTP 端口 |
+| `RATE_LIMIT_PER_MINUTE` | `5` | 每用戶每分鐘請求上限 |
+| `CACHE_TTL` | `300` | 報告快取秒數 |
+| `DB_PATH` | `bot_data.db` | SQLite 檔案路徑 |
+| `PEER_COMPARISON_ENABLED` | `true` | 啟用同業比較 |
+| `HISTORY_ENABLED` | `true` | 啟用歷史回測 |
+| `NEWSLETTER_ENABLED` | `true` | 啟動時生成日報（目前僅 log，未推送） |
 
-# 建立虛擬環境
-python3 -m venv venv
-source venv/bin/activate  # macOS/Linux
-# venv\Scripts\activate   # Windows
+</details>
 
-# 安裝套件
-pip install -r requirements.txt
+<details>
+<summary><b>模型選擇建議</b></summary>
 
-# 設定環境變數
-cp .env.example .env
-# 編輯 .env 填入你的 API Keys
-```
+| 模型 | 場景 |
+|---|---|
+| `claude-sonnet-4-6` | **推薦**，品質 / 成本平衡 |
+| `claude-opus-4-6` | 最高品質分析，成本較高 |
+| `claude-haiku-4-5-20251001` | 最快速度，適合高頻使用 |
 
-### 3. 啟動 Bot
-
-```bash
-python main.py
-```
-
----
-
-## ☁️ Zeabur 部署
-
-1. 前往 [Zeabur](https://zeabur.com/) 建立專案
-2. 選擇 **Import from GitHub** → 選擇 `stock-analysis-telegram-bot`
-3. 在 **Variables** 頁面設定以下環境變數：
-
-```
-TELEGRAM_BOT_TOKEN=你的_Telegram_Bot_Token
-FINNHUB_API_KEY=你的_Finnhub_API_Key
-TAVILY_API_KEY=你的_Tavily_API_Key
-ANTHROPIC_API_KEY=你的_Anthropic_API_Key
-```
-
-4. 部署完成，Bot 自動啟動！（健康檢查端點自動在 8080 port 運行）
-
-### Zeabur 環境變數完整設定
-
-#### 必要環境變數
-
-| 變數名稱 | 說明 | 範例值 |
-|----------|------|--------|
-| `TELEGRAM_BOT_TOKEN` | Telegram Bot Token | `123456:ABC-DEF...` |
-| `FINNHUB_API_KEY` | Finnhub 即時股價 API Key | `cXXXXXXXXXXXXXX` |
-| `TAVILY_API_KEY` | Tavily 新聞搜尋 API Key | `tvly-XXXXXXXXXX` |
-| `ANTHROPIC_API_KEY` | Anthropic Claude API Key | `sk-ant-XXXXXXXXXX` |
-
-#### 選用環境變數
-
-| 變數名稱 | 說明 | 預設值 |
-|----------|------|--------|
-| `ANTHROPIC_MODEL` | Claude 模型版本 | `claude-sonnet-4-6` |
-| `BOT_MODE` | Bot 運作模式 | `polling` |
-| `WEBHOOK_URL` | Webhook 模式 URL（webhook 模式必填） | — |
-| `APP_ENV` | 應用環境 | `production` |
-| `HEALTH_ENABLED` | 啟用健康檢查端點 | `true` |
-| `HEALTH_PORT` | 健康檢查端口 | `8080` |
-| `RATE_LIMIT_PER_MINUTE` | 每用戶每分鐘請求上限 | `5` |
-| `CACHE_TTL` | 報告快取時間（秒） | `300` |
-| `DB_PATH` | SQLite 資料庫路徑 | `bot_data.db` |
-| `PEER_COMPARISON_ENABLED` | 啟用同業比較 | `true` |
-| `HISTORY_ENABLED` | 啟用歷史回測 | `true` |
-
-#### 進階部署設定（建議 Production 使用）
-
-```
-BOT_MODE=webhook                # 使用 Webhook 模式降低資源消耗
-WEBHOOK_URL=https://your-bot.zeabur.app
-APP_ENV=production              # 啟用結構化 JSON 日誌
-HEALTH_ENABLED=true             # 啟用 /health 端點
-ANTHROPIC_MODEL=claude-sonnet-4-6  # 可選 claude-sonnet-4-6 / claude-haiku-4-5-20251001
-```
-
-> 可用模型建議：
-> - `claude-sonnet-4-6`：推薦，兼顧分析品質與成本
-> - `claude-opus-4-6`：最高品質分析，成本較高
-> - `claude-haiku-4-5-20251001`：最快速度，適合高頻使用場景
+</details>
 
 ---
 
-## 💬 使用方式
+## 🔧 技術棧
 
-在 Telegram 中與 Bot 對話：
-
-| 指令 | 說明 | 範例 |
-|------|------|------|
-| `/start` | 查看歡迎訊息與使用說明 | `/start` |
-| `/report [代碼]` | 產生完整股票分析報告 | `/report AAPL` |
-| `/report [ETF]` | 分析 ETF | `/report SPY` |
-| `/watchlist` | 查看自選股清單 | `/watchlist` |
-| `/watch [代碼]` | 加入自選股 | `/watch TSLA` |
-| `/unwatch [代碼]` | 移除自選股 | `/unwatch TSLA` |
-
----
-
-## 🔧 技術細節
-
-### 技術棧
-
-| 技術 | 用途 |
-|------|------|
-| **Python 3.9+** | 主要語言 |
-| **python-telegram-bot** | Telegram Bot 框架 |
-| **Anthropic Claude** | AI 分析引擎 |
-| **Finnhub** | 即時股價 API |
-| **yfinance** | 基本面 + 歷史數據 + 同業比較 |
-| **Tavily** | 新聞搜尋 API |
-| **TradingView-TA** | 技術指標分析 |
-| **mplfinance** | K 線圖生成 |
-| **SQLite** | 自選股 + 查詢歷史 |
-| **aiohttp** | 健康檢查 HTTP 端點 |
-| **asyncio** | 非同步並行處理 |
+| 用途 | 技術 |
+|---|---|
+| 語言 | Python 3.10+ |
+| Bot 框架 | `python-telegram-bot` 22.x |
+| AI | Anthropic Claude（`anthropic>=0.52.0` + Prompt Caching） |
+| 即時股價 | Finnhub |
+| 基本面 | FMP（主） / yfinance（備援） |
+| 技術指標 | TradingView-TA |
+| 新聞 | Tavily |
+| K 線圖 | mplfinance |
+| 非同步 | `asyncio` + `asyncio.to_thread` |
+| 儲存 | SQLite（WAL 模式） |
+| 部署 | Zeabur |
 
 ### 關鍵設計決策
 
-| 決策 | 理由 |
-|------|------|
-| `asyncio.to_thread()` 包裝同步 API | 避免阻塞 event loop，實現真正並行 |
-| Claude `temperature=0.3` | 降低創造性回答，提升事實性 |
-| Claude `system` 參數獨立 | 相比放在 messages 中，system prompt 遵循度更高 |
-| 原始數據同步展示 | 反幻覺最後防線，使用者可交叉驗證 |
-| 模組化架構 | 數據源獨立，可輕鬆替換或擴展 |
-| Singleton 客戶端 | 避免重複建立 API 連線 |
-| 分層 LRU 快取 | Raw 數據 30 分鐘 + 報告 5 分鐘，LRU 淘汰防止記憶體膨脹 |
-| API 指數退避重試 | 自動重試 1 次 + 2s 等待，提升數據源穩定性 |
-| Per-user Rate Limiting | 防止單一使用者濫用（每分鐘 5 次） |
-| SQLite WAL 模式 | 高併發讀寫效能 |
-| Webhook 模式選項 | 降低 Zeabur 資源消耗 |
-
-### 環境配置
-
-| 變數 | 說明 | 預設 |
-|------|------|------|
-| `APP_ENV` | 環境（dev/staging/production） | production |
-| `BOT_MODE` | Bot 模式（polling/webhook） | polling |
-| `ANTHROPIC_MODEL` | Claude 模型版本 | claude-sonnet-4-6 |
-| `HEALTH_PORT` | 健康檢查端口 | 8080 |
-| `RATE_LIMIT_PER_MINUTE` | 每用戶每分鐘請求上限 | 5 |
-| `CACHE_TTL` | 快取存活時間（秒） | 300 |
-| `PEER_COMPARISON_ENABLED` | 啟用同業比較 | true |
-| `HISTORY_ENABLED` | 啟用歷史回測 | true |
+- **FMP primary → yfinance fallback**：FMP 付費穩定為主力，yfinance 免費但限流時無縫備援
+- **Prompt Caching**：`system` prompt ≈ 2KB，第 2 次起 input token 折扣 ≈ 70%
+- **Telegram HTML parse mode**：取代 legacy Markdown，對 `&` / `_` / URL 破版容忍度遠高
+- **規則引擎 + LLM 分工**：純 Python 先算信號共識，LLM 只負責「解讀與交叉驗證」，降低幻覺
+- **LRU 分層快取**：raw 30 分鐘防重複 API，report 5 分鐘保即時性
+- **Per-user rate limit + Semaphore(3)**：防單用戶濫用 + 全域並發上限
 
 ---
 
-## 📝 修改歷程 (Changelog)
+## 📝 修改歷程
+
+### v5.0 — Prompt Cache · 12 維度信號 · HTML 模式 (2026-04-23)
+
+**AI 層**
+- Anthropic **Prompt Caching** 上線：analyzer / planner / writer 共用 client，system prompt 走 `cache_control=ephemeral`，第 2 次起 input token 約 70% 折扣
+
+**量化信號**
+- 從 **8 維擴為 12 維**：新增「內部人動向 / EPS 紀錄 / 宏觀環境 / 相對強弱」四訊號（先前抓取但未納入加權的數據全部接入），`WEIGHTS` 重平衡
+
+**Telegram UX**
+- Markdown → **HTML parse mode**：新聞 URL / `&` 字元破版徹底解決
+- 新增 `/help`、`/chart`、`/compare` 三個指令
+- `setMyCommands` 註冊左下角指令選單
+- Loading 期間發 `TYPING` / `UPLOAD_PHOTO` ChatAction
+- 快取命中時 `disable_notification=True`，避免打擾
+
+**程式碼品質**
+- 重構 `_execute_analysis(chat_id, ticker, bot)`，移除 InlineKeyboard 回調的 fake-update hack
+- `Semaphore.locked()` 取代私有 `_value` API
+- 清除死碼 `_TICKER_PATTERN`
 
 ### v4.1 — 五大優化升級 (2026-04-23)
 
-#### 📈 K 線圖生成
-- **mplfinance 整合**：自動生成 60 日 K 線圖，含 MA5/MA20/MA60 均線
-- **暗色主題**：nightclouds 風格，漲跌分色（綠漲紅跌），搭配成交量柱
-- **圖片發送**：在分析報告前以圖片方式傳送，直觀展示走勢
+- **K 線圖生成**：mplfinance 暗色主題，60 日 MA5/20/60
+- **API 指數退避重試**：所有 fetcher 自動重試 1 次、2s 退避
+- **財報日曆提醒**：下次財報日 + 倒數天數（7 天內 ⚠️）
+- **InlineKeyboard 互動**：「加入自選股」「重新分析」按鈕
+- **分層 LRU 快取**：raw 30 分 / report 5 分
 
-#### 🔄 API 指數退避重試
-- **新增 `utils/retry.py`**：`retry_async_call()` 通用重試函數
-- **所有 Fetcher 整合**：Finnhub、yfinance、Tavily、TradingView、歷史回測、同業比較全部啟用
-- **策略**：失敗後等待 2s 重試 1 次（指數退避），大幅提升數據抓取成功率
+### v4.0 — Anthropic Claude 整合 (2026-03-23)
 
-#### 📅 財報日曆提醒
-- **earningsDate 提取**：從 yfinance 取得下次財報發布日期
-- **倒數天數顯示**：報告中顯示「距離財報 X 天」，7 天內加 ⚠️ 提醒
-- **自動解析**：支援 earningsTimestamp（Unix）與 earningsDate（Timestamp list）兩種格式
+OpenAI → Anthropic Claude；200K context window；`system` 參數獨立於 messages，指令遵循度更佳
 
-#### 🎮 InlineKeyboard 互動
-- **報告附帶互動按鈕**：每份報告底部顯示「加入自選股」與「重新分析」按鈕
-- **一鍵加入自選**：點擊即加入自選股清單，免輸入指令
-- **一鍵刷新**：點擊即重新抓取數據並生成最新分析
-- **CallbackQueryHandler**：新增回調處理器，含 Rate Limit 保護
-
-#### 🗃️ 分層快取 + LRU 上限
-- **新增 `utils/cache.py`**：基於 OrderedDict 的 LRU Cache
-- **Raw 數據快取**：TTL 30 分鐘，最多 100 條，避免重複 API 呼叫
-- **報告快取**：TTL 5 分鐘，最多 50 條，確保即時性
-- **LRU 淘汰**：超過上限自動淘汰最久未使用的項目
-- **取代舊快取**：移除 `_report_cache` 字典，統一使用分層快取
-
-### v4.0 — Anthropic Claude API 整合 (2026-03-23)
-
-#### 🤖 AI 引擎升級
-- **替換 OpenAI → Anthropic Claude**：改用 Anthropic Messages API，分析品質與成本效益提升
-- **System Prompt 獨立參數**：Claude 的 `system` 參數獨立於 messages，指令遵循度更高，反幻覺效果更佳
-- **模型可配置**：支援 `claude-sonnet-4-6`（預設）、`claude-opus-4-6`、`claude-haiku-4-5-20251001`
-- **200K Context Window**：Claude 支援更大的上下文窗口，可處理更豐富的股票數據
-
-#### ⚙️ 工程調整
-- 新增 `analyzer/anthropic_analyzer.py`，移除 `analyzer/openai_analyzer.py`
-- 環境變數：`OPENAI_API_KEY` → `ANTHROPIC_API_KEY`、`OPENAI_MODEL` → `ANTHROPIC_MODEL`
-- 依賴更新：`openai` → `anthropic`，移除 `tiktoken`
-- README 更新 Zeabur 環境變數完整對照表
+<details>
+<summary>📜 v1.0 – v3.0 歷史版本</summary>
 
 ### v3.0 — 全面功能擴展 (2026-03-13)
-
-#### 🏦 美股分析師
-- **歷史數據回測**：新增 7/30/60/90 天區間報酬率、30 日年化波動率
-- **支撐壓力位計算**：基於近 20/60 日高低點 + SMA20/SMA50 動態支撐壓力
-- **同業比較**：自動抓取同產業 4 家代表公司，比較 PE、利潤率、營收成長
-- **ETF 支援**：ticker 驗證放寬，支援 SPY、QQQ、VOO 等 ETF
-- **System Prompt 強化**：新增歷史回測分析指引、同業對比維度
-
-#### 🎨 前端 UX/UI
-- **自選股清單**：`/watchlist`、`/watch`、`/unwatch` 三指令完整自選股管理
-- **歷史回測區塊**：顯示多時間區間報酬率 + 波動率
-- **支撐壓力位區塊**：短期/中期支撐壓力 + 動態均線參考
-- **同業比較區塊**：PE/利潤率/成長率 vs 同業平均
-
-#### ⚙️ 後端工程
-- **Webhook 模式**：新增 `BOT_MODE=webhook` 選項，降低 Zeabur 資源消耗
-- **SQLite 資料庫**：WAL 模式，存儲自選股清單與查詢歷史
-- **Per-user Rate Limiter**：滑動窗口限流，每分鐘 5 次（可配置）
-- **HTTP 健康檢查**：`/health` 端點，回報 uptime、請求計數，供 Zeabur 監控
-- **結構化 JSON 日誌**：production 環境自動啟用，便於日誌分析
-- **Graceful Shutdown**：信號處理，確保進行中的分析完成後才停止
-- **環境配置分離**：`APP_ENV` 支援 dev/staging/production 多環境
-- **降低第三方日誌噪音**：httpx/httpcore 等設為 WARNING 等級
-- **查詢記錄**：每次 `/report` 自動記入資料庫
+- 歷史回測（7/30/60/90d 報酬 + 年化波動）
+- 支撐壓力位（20/60 日高低點 + 動態均線）
+- 同業比較（自動找同產業 4 家）
+- ETF 支援（SPY / QQQ / VOO）
+- 自選股、Webhook 模式、SQLite WAL、Per-user 限流、`/health` 端點、結構化 JSON log、Graceful Shutdown
 
 ### v2.1 — 三角色深度優化 v2 (2026-03-13)
-
-#### 🏦 美股分析師優化
-- 修正 PE 提示 emoji（Forward PE < Trailing PE → 📈成長預期）
-- 強化 System Prompt（20 年華爾街經驗、PEG 框架、均線排列定義）
-- 新增籌碼面數據（Short Ratio、機構持股）
-- 新增技術指標（布林通道、Stochastic %D、ATR）
-
-#### 🎨 前端 UX/UI 優化
-- 新增快速摘要欄位 `⚡`（3 秒掌握重點）
-- 新增均線趨勢判斷（多頭/空頭排列）
-- 新增布林通道、籌碼面區塊
-
-#### ⚙️ 後端工程優化
-- 修復 Semaphore 並發控制 Bug
-- Singleton 客戶端（Finnhub、Tavily、Anthropic）
-- 5 分鐘 TTL 快取
-- Markdown 衝突清理強化
+- PEG 框架、均線排列、布林 / Stochastic / ATR、Short Ratio / 機構持股
 
 ### v2.0 — 三角色深度優化 (2026-03-12)
-- 分析師：成交量分析、成長性評估、量化評分框架
-- 前端：精簡結構、Markdown 安全處理、視覺化指標
-- 後端：並發控制、超時管理、return_exceptions
+- 成交量 / 成長性 / 量化評分、Markdown 安全、並發控制
 
-### v1.1 — 修復 Bot 無反應 (2026-03-11)
-- 修正 Markdown 格式導致 Telegram 無法顯示的問題
-- 增強錯誤處理與 fallback 機制
+### v1.x — 初版 (2026-03-10 – 11)
+- 基礎架構 4 數據源 + AI + 反幻覺四層、Zeabur 部署、Markdown bug 修復
 
-### v1.0 — 初始版本 (2026-03-10)
-- 基礎架構：4 數據源 + AI 分析 + 格式化報告
-- 反幻覺四層防護
-- Zeabur 部署支援
+</details>
 
 ---
 
-## 🔮 未來優化方向
+## 🔮 Roadmap
 
-### 分析師面
-- [ ] **選擇權資料**：整合 Put/Call Ratio、隱含波動率 (IV) 等衍生品數據
-- [ ] **多時間框架技術分析**：日線 + 週線 + 月線綜合判斷
-- [ ] **產業輪動分析**：判斷資金流向哪些產業
-- [ ] **相關性分析**：與大盤指數（SPY）的 Beta 和相關係數
+### 📊 分析能力
+- [ ] **多大師人格化 agents**（Buffett / Munger / Graham / Lynch / Wood / Burry…）— ai-hedge-fund 風格
+- [ ] **`/backtest`** — 歷史信號回測驗證（過去 1 年 BULLISH 共識後 N 日報酬分布）
+- [ ] **選擇權資料**（Put/Call Ratio、IV rank、ATM straddle implied move）
+- [ ] **DCF / Damodaran 估值** — 合理價 vs 現價 upside
+- [ ] **產業輪動**（XLK / XLF / XLE / XLV 相對強弱）
+- [ ] **13F 機構持股變化**（Berkshire / ARK 增減持）
 
-### 前端面
-- [ ] **定時推送**：設定每日盤前/盤後自動推送追蹤個股報告
-- [ ] **多語言支援**：英文/簡體中文版本切換
-- [ ] **分析歷史查詢**：`/history` 查看過往分析記錄
-- [ ] **深度分析模式**：InlineKeyboard 選擇快速/標準/深度三種分析層級
+### 💬 UX / 互動
+- [ ] **Progressive disclosure**：Verdict Card → 分頁展開（基本面 / 技術面 / Smart Money / 信號 / 新聞 / AI）
+- [ ] **Telegram Mini App** — 自選股管理 Web UI
+- [ ] **定時推送** — 盤前 / 盤後自動推個股報告
+- [ ] **i18n** — 英文 UI
 
-### 後端面
-- [ ] **Redis 快取**：替換記憶體快取為 Redis，支援多實例水平擴展
-- [ ] **PostgreSQL**：替換 SQLite，支援更大規模部署
-- [ ] **Docker 化**：提供 Dockerfile 與 docker-compose.yml
-- [ ] **CI/CD**：GitHub Actions 自動化測試與部署
-- [ ] **單元測試**：為每個 fetcher 和 formatter 寫測試
-
----
-
-## 📄 授權
-
-本專案採用 [MIT License](LICENSE) 授權。
+### ⚙️ 工程
+- [ ] Redis 快取（替換記憶體 LRU，支援多實例）
+- [ ] PostgreSQL（替換 SQLite，支援大規模）
+- [ ] `aiosqlite` 重構 DB 層（解除全域 lock）
+- [ ] GitHub Actions CI + 單元測試（優先補 `utils/signals.py`）
 
 ---
 
 ## ⚠️ 免責聲明
 
-本工具僅供教育和研究用途。所有分析報告不構成投資建議。投資有風險，請自行判斷。
+本工具僅供教育與研究用途，所有分析報告**不構成投資建議**。投資有風險，請自行判斷。
+
+## 📄 License
+
+[MIT](LICENSE) © jack926509
