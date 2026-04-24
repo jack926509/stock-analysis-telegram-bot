@@ -406,8 +406,9 @@ async def _render_watchlist_view(user_id: int, force_refresh: bool = False) -> t
 
     if invalid:
         lines.append("")
+        lines.append(f"❓ <b>無法取得報價</b> ({len(invalid)} 檔，可能為非美股或代碼有誤)")
         for t in invalid:
-            lines.append(f"⚪ <b>{_esc(t)}</b>  報價載入失敗")
+            lines.append(f"  ⚪ <b>{_esc(t)}</b>  ➜ /report {_esc(t)} 嘗試完整分析")
 
     lines.append("\n/scan 批次快掃 (含 RSI / 技術評級)")
 
@@ -634,8 +635,9 @@ async def _run_scan(chat_id: int, user_id: int, bot) -> None:
     # ── 抓取失敗 ──
     if invalid:
         lines.append("")
+        lines.append(f"❓ <b>無法取得報價</b> ({len(invalid)} 檔，可能為非美股或代碼有誤)")
         for r in invalid:
-            lines.append(f"⚪ <b>{_esc(r['ticker'])}</b>  報價載入失敗")
+            lines.append(f"  ⚪ <b>{_esc(r['ticker'])}</b>  ➜ /report {_esc(r['ticker'])} 嘗試完整分析")
 
     footer = f"\n共 {len(tickers)} 檔  |  ➜ /report 查看完整分析"
     if truncated:
