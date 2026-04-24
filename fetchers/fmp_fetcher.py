@@ -9,6 +9,7 @@ import asyncio
 import logging
 
 import httpx
+import yfinance as yf
 
 from config import Config
 from utils.retry import retry_async_call
@@ -184,49 +185,167 @@ async def fetch_fmp_fundamentals(ticker: str) -> dict:
     }
 
 
+def _yf_quote_sync(ticker: str) -> dict | None:
+    """Synchronous yfinance fast_info quote fetch (runs in thread pool)."""
+    try:
+        stock = yf.Ticker(ticker)
+        fi = stock.fast_info
+        price = getattr(fi, "last_price", None)
+        if not price:
+            return None
+        prev_close = getattr(fi, "previous_close", None)
+        change = (price - prev_close) if prev_close else None
+        change_pct = ((change / prev_close) * 100) if (change is not None and prev_close) else None
+        return {
+            "price": price,
+            "change": change,
+            "change_pct": change_pct,
+            "name": ticker,
+            "day_high": getattr(fi, "day_high", None),
+            "day_low": getattr(fi, "day_low", None),
+            "year_high": getattr(fi, "fifty_two_week_high", None),
+            "year_low": getattr(fi, "fifty_two_week_low", None),
+            "price_avg_50": None,
+            "price_avg_200": None,
+            "volume": getattr(fi, "last_volume", None),
+            "avg_volume": getattr(fi, "three_month_average_volume", None),
+            "market_cap": getattr(fi, "market_cap", None),
+            "pe": None,
+            "earnings_announcement": None,
+            "_source": "yfinance",
+        }
+    except Exception as e:
+        logger.debug(f"[yfinance] Quote fallback for {ticker} failed: {e}")
+        return None
+
+
+async def _fetch_yfinance_quote(ticker: str) -> tuple[str, dict | None]:
+    result = await asyncio.to_thread(_yf_quote_sync, ticker.upper())
+    return ticker.upper(), result
+
+
+async def _fetch_finnhub_quote_normalized(ticker: str) -> tuple[str, dict | None]:
+    """Fetch Finnhub quote and normalize to batch-price format."""
+    try:
+        import finnhub
+        from config import Config as _Config
+
+        if not _Config.FINNHUB_API_KEY:
+            return ticker.upper(), None
+
+        def _get():
+            client = finnhub.Client(api_key=_Config.FINNHUB_API_KEY)
+            return client.quote(ticker.upper())
+
+        q = await asyncio.to_thread(_get)
+        price = q.get("c")
+        if not price:
+            return ticker.upper(), None
+
+        prev = q.get("pc") or 0
+        change = price - prev
+        change_pct = (change / prev * 100) if prev else None
+        return ticker.upper(), {
+            "price": price,
+            "change": change,
+            "change_pct": change_pct,
+            "name": ticker.upper(),
+            "day_high": q.get("h"),
+            "day_low": q.get("l"),
+            "year_high": None,
+            "year_low": None,
+            "price_avg_50": None,
+            "price_avg_200": None,
+            "volume": None,
+            "avg_volume": None,
+            "market_cap": None,
+            "pe": None,
+            "earnings_announcement": None,
+            "_source": "finnhub",
+        }
+    except Exception as e:
+        logger.debug(f"[Finnhub] Quote fallback for {ticker} failed: {e}")
+        return ticker.upper(), None
+
+
 async def fetch_fmp_batch_prices(tickers: list[str]) -> dict[str, dict]:
     """
     Batch fetch live prices for multiple tickers (watchlist use).
-    Uses /api/v3/quote/{csv_tickers} endpoint.
-    Returns {ticker: {price, change, changesPercentage, ...}}
+    Primary: FMP /api/v3/quote. Fallback: yfinance → Finnhub for missing tickers.
+    Returns {ticker: {price, change, change_pct, ...}}
     """
-    if not Config.FMP_API_KEY or not tickers:
+    if not tickers:
         return {}
 
-    try:
-        csv_tickers = ",".join(t.upper() for t in tickers)
-        url = f"{_BASE_URL}/quote/{csv_tickers}"
-        params = {"apikey": Config.FMP_API_KEY}
+    upper_tickers = [t.upper() for t in tickers]
+    result: dict[str, dict] = {}
 
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(url, params=params)
-            resp.raise_for_status()
-            data = resp.json()
+    # ── Primary: FMP batch ──
+    if Config.FMP_API_KEY:
+        try:
+            csv_tickers = ",".join(upper_tickers)
+            url = f"{_BASE_URL}/quote/{csv_tickers}"
+            params = {"apikey": Config.FMP_API_KEY}
 
-        if not isinstance(data, list):
-            return {}
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.get(url, params=params)
+                resp.raise_for_status()
+                data = resp.json()
 
-        return {
-            item["symbol"]: {
-                "price": item.get("price"),
-                "change": item.get("change"),
-                "change_pct": item.get("changesPercentage"),
-                "name": item.get("name", ""),
-                "day_high": item.get("dayHigh"),
-                "day_low": item.get("dayLow"),
-                "year_high": item.get("yearHigh"),
-                "year_low": item.get("yearLow"),
-                "price_avg_50": item.get("priceAvg50"),
-                "price_avg_200": item.get("priceAvg200"),
-                "volume": item.get("volume"),
-                "avg_volume": item.get("avgVolume"),
-                "market_cap": item.get("marketCap"),
-                "pe": item.get("pe"),
-                "earnings_announcement": item.get("earningsAnnouncement"),
-            }
-            for item in data
-            if item.get("symbol")
-        }
-    except Exception as e:
-        logger.warning(f"[FMP] Batch price fetch failed: {e}")
-        return {}
+            if isinstance(data, list):
+                for item in data:
+                    sym = item.get("symbol")
+                    if sym and item.get("price") is not None:
+                        result[sym] = {
+                            "price": item.get("price"),
+                            "change": item.get("change"),
+                            "change_pct": item.get("changesPercentage"),
+                            "name": item.get("name", ""),
+                            "day_high": item.get("dayHigh"),
+                            "day_low": item.get("dayLow"),
+                            "year_high": item.get("yearHigh"),
+                            "year_low": item.get("yearLow"),
+                            "price_avg_50": item.get("priceAvg50"),
+                            "price_avg_200": item.get("priceAvg200"),
+                            "volume": item.get("volume"),
+                            "avg_volume": item.get("avgVolume"),
+                            "market_cap": item.get("marketCap"),
+                            "pe": item.get("pe"),
+                            "earnings_announcement": item.get("earningsAnnouncement"),
+                            "_source": "fmp",
+                        }
+        except Exception as e:
+            logger.warning(f"[FMP] Batch price fetch failed: {e}")
+
+    # ── Fallback: yfinance for tickers missing from FMP ──
+    missing = [t for t in upper_tickers if t not in result]
+    if missing:
+        logger.info(f"[FMP] {len(missing)} tickers missing from FMP, trying yfinance: {missing}")
+        yf_tasks = [_fetch_yfinance_quote(t) for t in missing]
+        yf_results = await asyncio.gather(*yf_tasks, return_exceptions=True)
+
+        still_missing = []
+        for item in yf_results:
+            if isinstance(item, tuple):
+                sym, data = item
+                if data is not None:
+                    result[sym] = data
+                    logger.info(f"[yfinance] Fallback quote for {sym}: ${data.get('price'):.2f}")
+                else:
+                    still_missing.append(sym)
+            else:
+                still_missing.append(item)
+
+        # ── Secondary fallback: Finnhub for tickers yfinance also missed ──
+        if still_missing:
+            logger.info(f"[yfinance] {len(still_missing)} still missing, trying Finnhub: {still_missing}")
+            fh_tasks = [_fetch_finnhub_quote_normalized(t) for t in still_missing]
+            fh_results = await asyncio.gather(*fh_tasks, return_exceptions=True)
+            for item in fh_results:
+                if isinstance(item, tuple):
+                    sym, data = item
+                    if data is not None:
+                        result[sym] = data
+                        logger.info(f"[Finnhub] Fallback quote for {sym}: ${data.get('price'):.2f}")
+
+    return result
