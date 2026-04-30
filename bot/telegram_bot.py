@@ -79,6 +79,22 @@ def _validate_ticker(ticker: str) -> bool:
     return bool(_TICKER_PATTERN.match(ticker))
 
 
+# ── 錯誤訊息共用文案 ──
+_TICKER_HINT = "需 1–5 個英文字母或數字，例如 <code>AAPL</code>"
+
+
+def _usage_error(cmd: str, example: str) -> str:
+    """缺參數時的統一用法提示。"""
+    return f"❌ 請提供股票代碼\n例如：<code>/{cmd} {example}</code>"
+
+
+def _invalid_ticker_error(tickers: str | None = None) -> str:
+    """無效代碼的統一錯誤訊息。"""
+    if tickers:
+        return f"❌ 無效的股票代碼：<code>{_esc(tickers)}</code>\n{_TICKER_HINT}"
+    return f"❌ 無效的股票代碼\n{_TICKER_HINT}"
+
+
 def _pos_52w(price, year_high, year_low) -> float | None:
     """股價在 52 週區間的相對位置 0–100（貼近 52w 低為 0、貼近 52w 高為 100）。"""
     try:
@@ -178,54 +194,43 @@ def _wl_cache_age(key: tuple) -> int | None:
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """處理 /start 指令"""
     welcome_msg = (
-        "👋 歡迎使用美股分析 Bot!\n"
+        "📊 <b>美股深度分析 Bot</b>\n"
+        "12 維度量化信號 + Claude AI 四觀點 + SEC 10-K 全文解析\n"
         "\n"
-        "📌 指令：\n"
-        "  /report AAPL — 完整深度分析報告\n"
-        "  /tenk AAPL — 10-K 年報深度分析（5-15 分鐘）\n"
-        "  /chart AAPL — 僅 60 日 K 線圖\n"
-        "  /compare AAPL MSFT NVDA — 多股橫向對比\n"
-        "  /watchlist — 自選股清單（即時報價）\n"
-        "  /scan — 自選股批次快掃總覽\n"
-        "  /watch AAPL  /unwatch AAPL — 新增 / 移除\n"
-        "  /help — 詳細指令說明\n"
+        "<b>三種分析深度</b>\n"
+        "<code>/report AAPL</code> — 60 秒完整報告\n"
+        "<code>/tenk AAPL</code> — 10-K 年報深度（5–15 分鐘）\n"
+        "<code>/chart AAPL</code> — K 線圖秒回\n"
         "\n"
-        "🔍 FMP + yfinance 雙源基本面\n"
-        "🧮 12 維度量化信號引擎\n"
-        "🏦 分析師·內部人·EPS 驚喜\n"
-        "🌍 VIX·殖利率 宏觀環境\n"
-        "🤖 Claude 四觀點深度分析\n"
-        "📊 所有分析皆基於真實數據，原始數據與 AI 分析同步展示"
+        "<b>自選股</b>\n"
+        "<code>/watch AAPL</code> 加入 · <code>/watchlist</code> 看清單 · <code>/scan</code> 批次掃\n"
+        "\n"
+        "輸入 /help 看完整指令"
     )
-    await update.message.reply_text(welcome_msg)
+    await update.message.reply_text(welcome_msg, parse_mode=ParseMode.HTML)
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """處理 /help 指令 — 詳細指令與用法說明。"""
     msg = (
-        "<b>🧭 指令手冊</b>\n\n"
-        "<b>/report &lt;TICKER&gt;</b>\n"
-        "  產生完整深度分析報告，包含 12 維度量化信號 + Claude AI 分析。\n"
-        "  範例：<code>/report AAPL</code>\n\n"
-        "<b>/tenk &lt;TICKER&gt; [YEAR] [Q1|Q2|Q3]</b>\n"
-        "  從 SEC 10-K / 10-Q 自動抽取 25 維度深度分析。\n"
-        "  Bull/Bear case、評價趨勢三條件紅綠燈、風險清單、跨年對比。\n"
-        "  跑一次 5-15 分鐘，每日上限 3 次。半年內同一份不重跑。\n"
-        "  範例：<code>/tenk NVDA</code>　<code>/tenk NVDA 2024</code>　<code>/tenk NVDA 2025 Q1</code>\n\n"
-        "<b>/chart &lt;TICKER&gt;</b>\n"
-        "  只發送 60 日 K 線圖（MA5/MA20/MA60），不跑 AI 分析，秒回。\n"
-        "  範例：<code>/chart TSLA</code>\n\n"
-        "<b>/compare &lt;TICKER1&gt; &lt;TICKER2&gt; ...</b>\n"
-        "  並排對比 2–5 檔個股的即時價、建議、RSI、市值。\n"
-        "  範例：<code>/compare AAPL MSFT NVDA</code>\n\n"
-        "<b>/watchlist</b>\n"
-        "  顯示自選股即時報價。\n\n"
-        "<b>/scan</b>\n"
-        "  批次快掃自選股（報價 + 技術面共識 + RSI）。\n\n"
-        "<b>/watch &lt;TICKER&gt;</b> / <b>/unwatch &lt;TICKER&gt;</b>\n"
-        "  新增 / 移除自選股。\n\n"
-        "📡 資料來源：Finnhub · FMP · yfinance · TradingView · Tavily\n"
-        "🛡️ 反幻覺：所有 AI 分析皆需數據佐證，缺失即標 N/A。"
+        "🧭 <b>指令手冊</b>\n"
+        "\n"
+        "<b>🔍 分析</b>\n"
+        "<code>/report TICKER</code> — 完整深度分析（12 信號 + Claude AI）\n"
+        "<code>/tenk TICKER [年] [Q1|Q2|Q3]</code> — 10-K / 10-Q 深度（5–15 分鐘，每日 3 次）\n"
+        "<code>/chart TICKER</code> — 60 日 K 線圖（秒回，省 Claude 費用）\n"
+        "<code>/compare T1 T2 …</code> — 並排對比 2–5 檔\n"
+        "\n"
+        "<b>📋 自選股</b>\n"
+        "<code>/watchlist</code> — 即時報價儀表板（含警示・52w 位置）\n"
+        "<code>/scan</code> — 批次快掃（含 RSI / 技術評級 / 警示分組）\n"
+        "<code>/watch TICKER</code> 加入 · <code>/unwatch TICKER</code> 移除\n"
+        "\n"
+        "<b>🧭 其他</b>\n"
+        "<code>/start</code> 歡迎訊息 · <code>/help</code> 本手冊\n"
+        "\n"
+        "📡 資料：Finnhub · FMP · yfinance · TradingView · Tavily · SEC EDGAR\n"
+        "🛡️ 反幻覺：所有 AI 分析皆需數據佐證，缺失即標 N/A"
     )
     await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
 
@@ -233,17 +238,13 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """處理 /report [TICKER] 指令。"""
     if not context.args:
-        await update.message.reply_text(
-            "❌ 請提供股票代碼，例如：/report AAPL"
-        )
+        await update.message.reply_text(_usage_error("report", "AAPL"), parse_mode=ParseMode.HTML)
         return
 
     ticker = context.args[0].upper()
 
     if not _validate_ticker(ticker):
-        await update.message.reply_text(
-            "❌ 無效的股票代碼。請使用英文代碼（1-5 字），例如：/report AAPL"
-        )
+        await update.message.reply_text(_invalid_ticker_error(ticker), parse_mode=ParseMode.HTML)
         return
 
     chat_id = update.effective_chat.id
@@ -253,8 +254,8 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not rate_limiter.is_allowed(user_id):
         wait = rate_limiter.retry_after(user_id)
         await update.message.reply_text(
-            f"⏰ 請求過於頻繁，請 {wait} 秒後再試。\n"
-            f"（每分鐘最多 {Config.RATE_LIMIT_PER_MINUTE} 次查詢）"
+            f"⏰ 請求過於頻繁，{wait} 秒後再試\n"
+            f"每分鐘上限 {Config.RATE_LIMIT_PER_MINUTE} 次"
         )
         return
 
@@ -295,9 +296,10 @@ async def _dispatch_analysis(chat_id: int, user_id: int, ticker: str, bot) -> No
         await bot.send_message(
             chat_id=chat_id,
             text=(
-                f"⏳ 系統繁忙中，目前有 3 筆分析正在處理。\n"
-                f"請稍候片刻再重新查詢 /report {ticker}"
+                f"⏳ 系統繁忙中，目前有 3 筆分析在跑\n"
+                f"稍後重試：<code>/report {ticker}</code>"
             ),
+            parse_mode=ParseMode.HTML,
         )
         return
 
@@ -320,9 +322,9 @@ async def _render_watchlist_view(user_id: int, force_refresh: bool = False) -> t
     tickers = await get_watchlist(user_id)
     if not tickers:
         return (
-            "📋 你的自選股清單是空的。\n\n"
-            "使用 /watch AAPL 加入股票\n"
-            "或 /report AAPL 直接分析"
+            "📋 你的自選股清單是空的\n\n"
+            "<code>/watch AAPL</code> 加入第一檔\n"
+            "<code>/report AAPL</code> 直接分析（不需先加入）"
         ), None, False
 
     cache_key = (user_id, tuple(tickers))
@@ -425,7 +427,7 @@ async def _render_watchlist_view(user_id: int, force_refresh: bool = False) -> t
 async def watchlist_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """處理 /watchlist 指令：顯示自選股清單 + 即時報價（含 120s 結果快取、視覺化 52w、財報臨近）。"""
     user_id = update.effective_user.id
-    loading = await update.message.reply_text("📋 正在載入自選股即時報價...")
+    loading = await update.message.reply_text("📋 載入自選股…")
     text, keyboard, _ = await _render_watchlist_view(user_id, force_refresh=False)
     await loading.edit_text(
         text,
@@ -438,27 +440,33 @@ async def watchlist_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 async def watch_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """處理 /watch [TICKER] 指令：加入自選股。"""
     if not context.args:
-        await update.message.reply_text("❌ 請提供股票代碼，例如：/watch AAPL")
+        await update.message.reply_text(_usage_error("watch", "AAPL"), parse_mode=ParseMode.HTML)
         return
 
     ticker = context.args[0].upper()
     if not _validate_ticker(ticker):
-        await update.message.reply_text("❌ 無效的股票代碼")
+        await update.message.reply_text(_invalid_ticker_error(ticker), parse_mode=ParseMode.HTML)
         return
 
     user_id = update.effective_user.id
     added = await add_to_watchlist(user_id, ticker)
 
     if added:
-        await update.message.reply_text(f"✅ 已將 {ticker} 加入自選股清單")
+        await update.message.reply_text(
+            f"✅ <code>{ticker}</code> 已加入自選股\n用 /watchlist 看清單，或 /report {ticker} 直接分析",
+            parse_mode=ParseMode.HTML,
+        )
     else:
-        await update.message.reply_text(f"ℹ️ {ticker} 已在自選股清單中")
+        await update.message.reply_text(
+            f"ℹ️ <code>{ticker}</code> 已在清單中",
+            parse_mode=ParseMode.HTML,
+        )
 
 
 async def unwatch_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """處理 /unwatch [TICKER] 指令：移除自選股。"""
     if not context.args:
-        await update.message.reply_text("❌ 請提供股票代碼，例如：/unwatch AAPL")
+        await update.message.reply_text(_usage_error("unwatch", "AAPL"), parse_mode=ParseMode.HTML)
         return
 
     ticker = context.args[0].upper()
@@ -466,9 +474,15 @@ async def unwatch_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     removed = await remove_from_watchlist(user_id, ticker)
 
     if removed:
-        await update.message.reply_text(f"✅ 已將 {ticker} 從自選股清單移除")
+        await update.message.reply_text(
+            f"✅ 已從自選股移除 <code>{ticker}</code>",
+            parse_mode=ParseMode.HTML,
+        )
     else:
-        await update.message.reply_text(f"ℹ️ {ticker} 不在自選股清單中")
+        await update.message.reply_text(
+            f"ℹ️ <code>{ticker}</code> 不在清單中",
+            parse_mode=ParseMode.HTML,
+        )
 
 
 async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -484,7 +498,8 @@ async def _run_scan(chat_id: int, user_id: int, bot) -> None:
     if not tickers:
         await bot.send_message(
             chat_id=chat_id,
-            text="📋 自選股清單是空的。\n使用 /watch AAPL 加入股票",
+            text="📋 自選股清單是空的\n用 <code>/watch AAPL</code> 加入第一檔",
+            parse_mode=ParseMode.HTML,
         )
         return
 
@@ -494,7 +509,7 @@ async def _run_scan(chat_id: int, user_id: int, bot) -> None:
 
     loading = await bot.send_message(
         chat_id=chat_id,
-        text=f"🔍 正在掃描 {len(tickers)} 檔自選股...",
+        text=f"🔍 掃描 {len(tickers)} 檔自選股…",
     )
 
     prices = await fetch_fmp_batch_prices(tickers)
@@ -660,18 +675,18 @@ async def _run_scan(chat_id: int, user_id: int, bot) -> None:
 async def chart_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """處理 /chart [TICKER]：僅回傳 60 日 K 線圖，不做 AI 分析。"""
     if not context.args:
-        await update.message.reply_text("❌ 請提供股票代碼，例如：/chart AAPL")
+        await update.message.reply_text(_usage_error("chart", "AAPL"), parse_mode=ParseMode.HTML)
         return
 
     ticker = context.args[0].upper()
     if not _validate_ticker(ticker):
-        await update.message.reply_text("❌ 無效的股票代碼")
+        await update.message.reply_text(_invalid_ticker_error(ticker), parse_mode=ParseMode.HTML)
         return
 
     user_id = update.effective_user.id
     if not rate_limiter.is_allowed(user_id):
         wait = rate_limiter.retry_after(user_id)
-        await update.message.reply_text(f"⏰ 請 {wait} 秒後再試")
+        await update.message.reply_text(f"⏰ 請求過於頻繁，{wait} 秒後再試")
         return
 
     chat_id = update.effective_chat.id
@@ -680,13 +695,14 @@ async def chart_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     chart_buf = await generate_chart(ticker)
     if not chart_buf:
         await update.message.reply_text(
-            f"❌ 無法生成 {ticker} 的 K 線圖（資料源可能暫時不可用）"
+            f"❌ 無法生成 <code>{ticker}</code> 的 K 線圖\n資料源可能暫時不可用，稍後再試",
+            parse_mode=ParseMode.HTML,
         )
         return
 
     await update.message.reply_photo(
         photo=chart_buf,
-        caption=f"📈 {ticker} — 60 日 K 線圖（MA5/MA20/MA60）",
+        caption=f"📈 {ticker} — 60 日 K 線圖（MA5 / MA20 / MA60）",
     )
 
 
@@ -694,28 +710,30 @@ async def compare_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     """處理 /compare TICKER1 TICKER2 ...：並排比較 2-5 檔個股。"""
     if not context.args or len(context.args) < 2:
         await update.message.reply_text(
-            "❌ 請提供至少 2 檔股票代碼，例如：/compare AAPL MSFT NVDA"
+            "❌ 請提供至少 2 檔股票代碼\n例如：<code>/compare AAPL MSFT NVDA</code>",
+            parse_mode=ParseMode.HTML,
         )
         return
 
     tickers = [t.upper() for t in context.args[:5]]
     invalid = [t for t in tickers if not _validate_ticker(t)]
     if invalid:
-        await update.message.reply_text(f"❌ 無效的股票代碼：{', '.join(invalid)}")
+        await update.message.reply_text(
+            _invalid_ticker_error(", ".join(invalid)),
+            parse_mode=ParseMode.HTML,
+        )
         return
 
     user_id = update.effective_user.id
     if not rate_limiter.is_allowed(user_id):
         wait = rate_limiter.retry_after(user_id)
-        await update.message.reply_text(f"⏰ 請 {wait} 秒後再試")
+        await update.message.reply_text(f"⏰ 請求過於頻繁，{wait} 秒後再試")
         return
 
     chat_id = update.effective_chat.id
     await context.bot.send_chat_action(chat_id, ChatAction.TYPING)
 
-    loading = await update.message.reply_text(
-        f"⚖️ 正在並排比較 {len(tickers)} 檔..."
-    )
+    loading = await update.message.reply_text(f"⚖️ 比較 {len(tickers)} 檔…")
 
     prices = await fetch_fmp_batch_prices(tickers)
     ta_tasks = [fetch_tradingview_analysis(t) for t in tickers]
@@ -786,7 +804,8 @@ async def _execute_analysis(chat_id: int, ticker: str, bot) -> None:
 
     loading_msg = await bot.send_message(
         chat_id=chat_id,
-        text=f"⏳ 正在分析 {ticker}...\n📡 並行抓取 10+ 數據源中...",
+        text=f"⏳ 分析 <b>{ticker}</b>…\n📡 並行抓取 10+ 數據源",
+        parse_mode=ParseMode.HTML,
     )
 
     try:
@@ -902,10 +921,11 @@ async def _execute_analysis(chat_id: int, ticker: str, bot) -> None:
 
         try:
             await loading_msg.edit_text(
-                f"⏳ 正在分析 {ticker}...\n"
+                f"⏳ 分析 <b>{ticker}</b>…\n"
                 f"✅ 數據抓取完成（{total_sources} 源）\n"
                 f"🧮 量化信號：{signals_data.get('consensus', 'N/A')}\n"
-                f"🤖 AI 四觀點深度分析中..."
+                f"🤖 Claude 四觀點深度分析中",
+                parse_mode=ParseMode.HTML,
             )
         except Exception:
             pass
@@ -963,22 +983,27 @@ async def _execute_analysis(chat_id: int, ticker: str, bot) -> None:
 
     except asyncio.TimeoutError:
         logger.error(f"[{ticker}] 數據抓取整體超時")
+        timeout_msg = (
+            f"❌ <b>{ticker}</b> 分析逾時\n"
+            f"數據源回應過慢，稍後重試：<code>/report {ticker}</code>"
+        )
         try:
-            await loading_msg.edit_text(
-                f"❌ 分析 {ticker} 超時，數據源回應過慢。\n"
-                f"請稍後再試：/report {ticker}"
-            )
+            await loading_msg.edit_text(timeout_msg, parse_mode=ParseMode.HTML)
         except Exception:
-            await bot.send_message(chat_id=chat_id, text=f"❌ 分析 {ticker} 超時，請稍後再試。")
+            await bot.send_message(chat_id=chat_id, text=timeout_msg, parse_mode=ParseMode.HTML)
 
     except Exception as e:
         logger.error(f"[{ticker}] 分析失敗: {e}", exc_info=True)
-        error_msg = f"❌ 分析 {ticker} 時發生錯誤：\n{str(e)[:200]}\n\n請稍後再試。"
+        error_msg = (
+            f"❌ <b>{ticker}</b> 分析失敗\n"
+            f"<code>{_esc(str(e)[:200])}</code>\n"
+            f"稍後重試：<code>/report {ticker}</code>"
+        )
         try:
-            await loading_msg.edit_text(error_msg)
+            await loading_msg.edit_text(error_msg, parse_mode=ParseMode.HTML)
         except Exception:
             try:
-                await bot.send_message(chat_id=chat_id, text=error_msg)
+                await bot.send_message(chat_id=chat_id, text=error_msg, parse_mode=ParseMode.HTML)
             except Exception:
                 pass
 
@@ -1194,7 +1219,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
     if update and isinstance(update, Update) and update.message:
         try:
             await update.message.reply_text(
-                "❌ 系統發生未預期的錯誤，請稍後再試。"
+                "❌ 系統發生錯誤，請稍後重試\n若持續發生，輸入 /help 查看其他指令"
             )
         except Exception:
             pass
