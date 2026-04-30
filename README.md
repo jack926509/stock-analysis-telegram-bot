@@ -24,6 +24,7 @@
 - 🔍 **10+ 數據源並行** — Finnhub · FMP · yfinance · TradingView · Tavily · 宏觀 · 分析師 · 內部人 · EPS
 - 🧮 **12 維度量化信號** — 純 Python 規則引擎，獨立於 LLM 的「確定性」共識
 - 🤖 **Claude 四觀點深度分析** — 價值 / 成長 / 技術 / 風險，Prompt Caching + compact context + 噪音過濾三重節流
+- 📑 **`/tenk` 10-K / 10-Q 深度分析** — SEC EDGAR 抓財報 → 章節切割 → 25+ Skill agent 並行 → Eval 自評重跑 → Bull/Bear/紅綠燈 Telegram 摘要
 - ⭐ **自選股秒覽儀表板** — 總覽列、強弱排序、🚨 警示分組、52w 視覺長條 `▌▌▌░░░░░`、📅 財報臨近、🔄 強刷
 - 🛡️ **反幻覺四層防護** — 缺失即標 `N/A`，原始數據與 AI 分析同步展示供交叉驗證
 - 📈 **K 線圖 + 互動按鈕** — 60 日 MA5/20/60、「加入自選股 / 重新分析」InlineKeyboard
@@ -79,8 +80,15 @@ python main.py
 | 指令 | 功能 | 範例 |
 |---|---|---|
 | `/report TICKER` | 完整深度分析（12 信號 + Claude AI） | `/report AAPL` |
+| `/tenk TICKER [年份] [Q1\|Q2\|Q3]` | 10-K / 10-Q 深度分析（5–15 分鐘，每日 3 次） | `/tenk AAPL`、`/tenk NVDA 2024`、`/tenk TSLA 2024 Q3` |
 | `/chart TICKER` | 僅 60 日 K 線圖（秒回，省 Claude 費用） | `/chart TSLA` |
 | `/compare T1 T2 …` | 並排對比 2–5 檔個股 | `/compare AAPL MSFT NVDA` |
+
+> 📑 **/tenk 機制**
+> - 從 SEC EDGAR 抓 10-K（年報）或 10-Q（季報）→ markitdown 轉純文字 → LLM 章節切割 → 25+ Skill agent 並行（業務 / 風險 / MD&A / 財務 / 不尋常項目 / 重估值 …）→ Eval 自評不足處重跑 → Bull/Bear 三點摘要 + 紅綠燈
+> - 同份財報 **180 天內快取**，重敲不重跑
+> - **每用戶每日 3 次**，全球同時只跑一份（成本控制）
+> - 5–15 分鐘期間會即時推送進度（fetch → sections → phase1/2/3 → eval → synth → report）
 
 ### 📋 自選股管理
 
@@ -211,7 +219,20 @@ stock-analysis-telegram-bot/
 │   └── ai/{planner,writer}.py
 │
 ├── bot/
-│   └── telegram_bot.py                 # 💬 指令 + 回調 + HTML parse mode
+│   ├── telegram_bot.py                 # 💬 指令 + 回調 + HTML parse mode
+│   └── tenk_handler.py                 # 📑 /tenk 背景任務 + 進度回呼 + 快取/限流
+│
+├── tenk/                       # 📑 10-K / 10-Q 深度分析管線（async）
+│   ├── pipeline.py                     # 對外 facade
+│   ├── orchestrator.py                 # 5 phases + eval loop + checkpoint
+│   ├── data_fetcher.py                 # SEC EDGAR XBRL + HTM 抓取
+│   ├── doc_converter.py                # markitdown / LlamaParse 轉純文字
+│   ├── section_splitter.py             # LLM 章節切割
+│   ├── agent_runner.py                 # async Anthropic agent + 共用 client
+│   ├── eval_runner.py                  # 自評不足處重跑
+│   ├── report_writer.py                # markdown + Telegram 摘要
+│   ├── pipeline_state.py               # checkpoint 續跑
+│   └── skills/                         # 25+ analyst skill prompt（business/risk/mdna…）
 │
 └── utils/
     ├── ai_client.py                    # 🧩 Anthropic 共用 client + Prompt Caching
@@ -220,7 +241,7 @@ stock-analysis-telegram-bot/
     ├── chart.py                        # 📈 mplfinance K 線圖
     ├── cache.py                        # 💾 LRU 分層快取（raw 30m / report 5m）
     ├── retry.py                        # 🔁 指數退避重試
-    ├── database.py                     # 🗃 SQLite 自選股 + 查詢歷史
+    ├── database.py                     # 🗃 SQLite 自選股 + 查詢歷史 + tenk 報告/配額
     ├── rate_limiter.py                 # ⏱ 滑動窗口 per-user 限流
     └── health.py                       # 🏥 HTTP /health 端點
 ```
@@ -260,6 +281,9 @@ stock-analysis-telegram-bot/
 | `PEER_COMPARISON_ENABLED` | `true` | 啟用同業比較 |
 | `HISTORY_ENABLED` | `true` | 啟用歷史回測 |
 | `NEWSLETTER_ENABLED` | `true` | 啟動時生成日報（目前僅 log，未推送） |
+| `LLAMA_CLOUD_API_KEY` | — | 選用，`/tenk` doc_converter 的 LlamaParse fallback；未設則純走 markitdown |
+
+> 📑 **`/tenk` 設定**：`TENK_ENABLED / TENK_DAILY_LIMIT(3) / TENK_REPORT_TTL_DAYS(180) / TENK_PIPELINE_TIMEOUT(1800) / TENK_CACHE_DIR / TENK_OUTPUT_DIR / TENK_SEC_USER_AGENT` 已寫死於 `config.py`，部署不需新增環境變數。
 
 </details>
 
@@ -309,6 +333,23 @@ stock-analysis-telegram-bot/
 ---
 
 ## 📝 修改歷程
+
+### v5.3 — `/tenk` 10-K / 10-Q 深度分析整合 (2026-04-30)
+
+**新增管線**（`tenk/` 套件，源自 [twCarllin/10k-analysis](https://github.com/twCarllin/10k-analysis) 重構為 async）
+- `/tenk TICKER [年份] [Q1|Q2|Q3]` — SEC EDGAR 抓財報 → markitdown 轉純文字 → LLM 章節切割 → **25+ Skill agent 並行**（業務 / 風險 / MD&A / 財務 / 不尋常項目 / 重估值 / 競爭對手 / 供應鏈 / 公司治理 …）→ Eval 自評不足處重跑 → **Bull/Bear 三點摘要 + 紅綠燈**
+- 全面改寫為 async：`asyncio.gather` + `Semaphore` 取代 `ThreadPoolExecutor`，與 bot 共用 `utils.ai_client` 享 Prompt Cache
+- 移除 PDF 輸出（weasyprint / matplotlib），純 markdown + Telegram HTML 摘要
+
+**Bot 整合**（`bot/tenk_handler.py`）
+- **背景任務 + 進度回呼**：`asyncio.create_task` 不阻塞，5–15 分鐘期間每 1.5 秒 throttle 更新一次階段（fetch → sections → phase1/2/3 → eval → synth → report）
+- **三層成本控管**：同份財報 180 天快取 / 每用戶每日 3 次 / 全域 `Semaphore(1)` 同時只跑一份
+- **30 分鐘 hard timeout**（`asyncio.wait_for`）
+
+**部署簡化**
+- TENK 全部設定寫死於 `config.py`，**Zeabur 不需新增任何環境變數**
+- `requirements.txt` 補 `markitdown[pdf]>=0.1.5` + `llama-parse>=0.5.0`
+- `utils/database.py` 新增 `tenk_reports`（報告快取）+ `tenk_usage`（每日配額）兩張表
 
 ### v5.2 — Watchlist 儀表板 v2 · Claude 三重節流 (2026-04-24)
 
