@@ -27,3 +27,10 @@ Thumbs.db
 # Database
 bot_data.db
 *.db
+
+# tenk runtime artifacts
+data/tenk_cache/
+data/tenk_output/
+tenk/_unused/
+tenk/.git_upstream_backup/
+tenk/.gitignore

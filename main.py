@@ -49,7 +49,7 @@ async def _run_bot():
     app = create_bot_application()
 
     logger.info("✅ Bot 已啟動！等待指令中...")
-    logger.info("📌 可用指令: /start, /help, /report, /chart, /compare, /watchlist, /scan, /watch, /unwatch")
+    logger.info("📌 可用指令: /start, /help, /report, /tenk, /chart, /compare, /watchlist, /scan, /watch, /unwatch")
 
     # 啟動 Bot
     if Config.BOT_MODE == "webhook":
@@ -131,7 +131,7 @@ def main():
 
             app.post_init = _post_init_minimal
             logger.info("✅ Bot 已啟動！等待指令中...")
-            logger.info("📌 可用指令: /start, /help, /report, /chart, /compare, /watchlist, /scan, /watch, /unwatch")
+            logger.info("📌 可用指令: /start, /help, /report, /tenk, /chart, /compare, /watchlist, /scan, /watch, /unwatch")
             app.run_polling(drop_pending_updates=True)
 
 
@@ -169,7 +169,7 @@ def _run_polling_with_health():
     app.post_shutdown = _post_shutdown
 
     logger.info("✅ Bot 已啟動！等待指令中...")
-    logger.info("📌 可用指令: /start, /help, /report, /chart, /compare, /watchlist, /scan, /watch, /unwatch")
+    logger.info("📌 可用指令: /start, /help, /report, /tenk, /chart, /compare, /watchlist, /scan, /watch, /unwatch")
     app.run_polling(drop_pending_updates=True)
 
 

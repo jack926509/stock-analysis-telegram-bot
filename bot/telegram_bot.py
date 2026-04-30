@@ -51,6 +51,7 @@ from utils.database import (
     get_watchlist,
     record_query,
 )
+from bot.tenk_handler import tenk_command
 
 logger = logging.getLogger(__name__)
 
@@ -181,6 +182,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "\n"
         "📌 指令：\n"
         "  /report AAPL — 完整深度分析報告\n"
+        "  /tenk AAPL — 10-K 年報深度分析（5-15 分鐘）\n"
         "  /chart AAPL — 僅 60 日 K 線圖\n"
         "  /compare AAPL MSFT NVDA — 多股橫向對比\n"
         "  /watchlist — 自選股清單（即時報價）\n"
@@ -205,6 +207,11 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "<b>/report &lt;TICKER&gt;</b>\n"
         "  產生完整深度分析報告，包含 12 維度量化信號 + Claude AI 分析。\n"
         "  範例：<code>/report AAPL</code>\n\n"
+        "<b>/tenk &lt;TICKER&gt; [YEAR] [Q1|Q2|Q3]</b>\n"
+        "  從 SEC 10-K / 10-Q 自動抽取 25 維度深度分析。\n"
+        "  Bull/Bear case、評價趨勢三條件紅綠燈、風險清單、跨年對比。\n"
+        "  跑一次 5-15 分鐘，每日上限 3 次。半年內同一份不重跑。\n"
+        "  範例：<code>/tenk NVDA</code>　<code>/tenk NVDA 2024</code>　<code>/tenk NVDA 2025 Q1</code>\n\n"
         "<b>/chart &lt;TICKER&gt;</b>\n"
         "  只發送 60 日 K 線圖（MA5/MA20/MA60），不跑 AI 分析，秒回。\n"
         "  範例：<code>/chart TSLA</code>\n\n"
@@ -1197,6 +1204,7 @@ async def setup_bot_commands(bot) -> None:
         BotCommand("start", "查看歡迎訊息"),
         BotCommand("help", "指令手冊"),
         BotCommand("report", "完整深度分析報告（需股票代碼）"),
+        BotCommand("tenk", "10-K 年報深度分析（5-15 分鐘）"),
         BotCommand("chart", "僅 K 線圖（需股票代碼）"),
         BotCommand("compare", "多股對比（2-5 檔代碼）"),
         BotCommand("watchlist", "自選股清單與即時報價"),
@@ -1219,6 +1227,7 @@ def create_bot_application() -> Application:
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("report", report_command))
+    app.add_handler(CommandHandler("tenk", tenk_command))
     app.add_handler(CommandHandler("chart", chart_command))
     app.add_handler(CommandHandler("compare", compare_command))
 
