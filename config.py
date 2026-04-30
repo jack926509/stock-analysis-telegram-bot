@@ -59,6 +59,21 @@ class Config:
     # ── Newsletter 日報 ──
     NEWSLETTER_ENABLED: bool = os.getenv("NEWSLETTER_ENABLED", "true").lower() == "true"
 
+    # ── 10-K / 10-Q 深度分析（tenk）──
+    TENK_ENABLED: bool = os.getenv("TENK_ENABLED", "true").lower() == "true"
+    TENK_CACHE_DIR: str = os.getenv("TENK_CACHE_DIR", "data/tenk_cache")  # 財報 HTM、章節切割快取
+    TENK_OUTPUT_DIR: str = os.getenv("TENK_OUTPUT_DIR", "data/tenk_output")  # 報告 markdown + context log
+    TENK_DAILY_LIMIT: int = int(os.getenv("TENK_DAILY_LIMIT", "3"))  # 每用戶每日次數
+    TENK_REPORT_TTL_DAYS: int = int(os.getenv("TENK_REPORT_TTL_DAYS", "180"))  # 半年內不重跑
+    TENK_PIPELINE_TIMEOUT: int = int(os.getenv("TENK_PIPELINE_TIMEOUT", "1800"))  # 單次最長 30 分鐘
+    # SEC EDGAR 要求 User-Agent 含可聯絡資訊（避免被擋）
+    TENK_SEC_USER_AGENT: str = os.getenv(
+        "TENK_SEC_USER_AGENT",
+        "stock-analysis-telegram-bot xieh.gemini@gmail.com",
+    )
+    # LlamaParse 是 doc_converter 的 fallback，沒有就走 markitdown
+    LLAMA_CLOUD_API_KEY: str = os.getenv("LLAMA_CLOUD_API_KEY", "")
+
     @classmethod
     def validate(cls) -> None:
         """驗證所有必要的環境變數是否已設定。"""
