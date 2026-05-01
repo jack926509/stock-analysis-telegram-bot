@@ -502,7 +502,7 @@ WEIGHTS = {
 
 def compute_signals(
     finnhub_data: dict,
-    yfinance_data: dict,
+    fundamentals_data: dict,
     tradingview_data: dict,
     history_data: dict | None = None,
     peer_data: dict | None = None,
@@ -525,10 +525,10 @@ def compute_signals(
         }
     """
     signals = [
-        _profitability_signal(yfinance_data),
-        _growth_signal(yfinance_data),
-        _health_signal(yfinance_data),
-        _valuation_signal(yfinance_data, peer_data),
+        _profitability_signal(fundamentals_data),
+        _growth_signal(fundamentals_data),
+        _health_signal(fundamentals_data),
+        _valuation_signal(fundamentals_data, peer_data),
         _trend_signal(tradingview_data, finnhub_data),
         _momentum_signal(tradingview_data, history_data),
         _volatility_signal(history_data),

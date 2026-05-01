@@ -1,54 +1,37 @@
 """
 歷史數據回測模組
-使用 yfinance 取得歷史 K 線，計算近 30/60/90 天報酬率、波動率。
-同時計算支撐壓力位（基於近期高低點與均線）。
+使用 FMP /historical-price-full 取得日 K 線，計算近 30/60/90 天報酬率、
+波動率、支撐壓力位、相對 SPY 的 alpha。
 """
 
-import asyncio
-from datetime import datetime, timedelta
-
-import yfinance as yf
 import numpy as np
 
-from utils.retry import retry_async_call
+from fetchers.fmp_fetcher import fetch_fmp_history
 
 
 async def fetch_history_analysis(ticker: str) -> dict:
-    """
-    抓取歷史數據並計算回測指標。
-
-    Returns:
-        dict: 包含歷史報酬率、波動率、支撐壓力位
-    """
+    """抓取歷史數據並計算回測指標。"""
     try:
-        stock = yf.Ticker(ticker.upper())
-
-        # 取 200 天歷史數據（足夠計算 90 天報酬 + 均線）
-        hist = await retry_async_call(
-            asyncio.to_thread,
-            lambda: stock.history(period="1y", interval="1d"),
-            source_name="yfinance_history",
-        )
-
-        if hist is None or hist.empty or len(hist) < 10:
+        rows = await fetch_fmp_history(ticker.upper(), days=252)
+        if not rows or len(rows) < 10:
             return {
-                "source": "yfinance_history",
+                "source": "fmp_history",
                 "error": f"無法取得 {ticker.upper()} 的歷史數據",
             }
 
-        closes = hist["Close"].values
-        highs = hist["High"].values
-        lows = hist["Low"].values
-        volumes = hist["Volume"].values
+        closes = np.array([float(r["close"]) for r in rows])
+        highs = np.array([float(r["high"]) for r in rows])
+        lows = np.array([float(r["low"]) for r in rows])
+        volumes = np.array([float(r.get("volume") or 0) for r in rows])
         current_price = float(closes[-1])
 
         result = {
-            "source": "yfinance_history",
+            "source": "fmp_history",
             "ticker": ticker.upper(),
             "data_points": len(closes),
         }
 
-        # ── 區間報酬率 ──
+        # 區間報酬率
         for days, label in [(7, "7d"), (30, "30d"), (60, "60d"), (90, "90d")]:
             if len(closes) > days:
                 past_price = float(closes[-(days + 1)])
@@ -57,7 +40,7 @@ async def fetch_history_analysis(ticker: str) -> dict:
             else:
                 result[f"return_{label}"] = "N/A"
 
-        # ── 波動率（年化，基於 30 日日報酬標準差）──
+        # 波動率（年化，30 日日報酬標準差）
         if len(closes) > 30:
             daily_returns = np.diff(closes[-31:]) / closes[-31:-1]
             volatility = float(np.std(daily_returns) * np.sqrt(252) * 100)
@@ -65,74 +48,57 @@ async def fetch_history_analysis(ticker: str) -> dict:
         else:
             result["volatility_30d"] = "N/A"
 
-        # ── 支撐壓力位計算 ──
+        # 支撐壓力
         result["support_resistance"] = _calc_support_resistance(
-            current_price, closes, highs, lows
+            current_price, closes, highs, lows,
         )
 
-        # ── 量能趨勢（近 5 日 vs 近 20 日平均）──
+        # 量能趨勢（近 5 日 vs 近 20 日平均）
         if len(volumes) >= 20:
             vol_5d = float(np.mean(volumes[-5:]))
             vol_20d = float(np.mean(volumes[-20:]))
-            if vol_20d > 0:
-                result["volume_trend"] = round(vol_5d / vol_20d, 2)
-            else:
-                result["volume_trend"] = "N/A"
+            result["volume_trend"] = round(vol_5d / vol_20d, 2) if vol_20d > 0 else "N/A"
         else:
             result["volume_trend"] = "N/A"
 
-        # ── 相對強弱 vs SPY（Alpha 判斷核心）──
+        # 相對 SPY 強弱
         if ticker.upper() != "SPY":
             try:
-                spy_rel = await _fetch_relative_strength(ticker, closes)
-                result.update(spy_rel)
+                result.update(await _fetch_relative_strength(closes))
             except Exception:
                 result["relative_strength_vs_spy"] = "N/A"
 
         return result
 
     except Exception as e:
-        return {
-            "source": "yfinance_history",
-            "error": f"歷史數據錯誤: {str(e)}",
-        }
+        return {"source": "fmp_history", "error": f"歷史數據錯誤: {e}"}
 
 
-async def _fetch_relative_strength(ticker: str, stock_closes: np.ndarray) -> dict:
-    """
-    計算個股 vs SPY 的相對強弱。
-    華爾街分析師核心指標：跑贏大盤 = 有 Alpha。
-    """
-    try:
-        spy = yf.Ticker("SPY")
-        spy_hist = await asyncio.to_thread(
-            lambda: spy.history(period="1y", interval="1d")
-        )
-
-        if spy_hist is None or spy_hist.empty:
-            return {"relative_strength_vs_spy": "N/A"}
-
-        spy_closes = spy_hist["Close"].values
-
-        result = {}
-        # 確保兩者長度對齊（取較短的）
-        min_len = min(len(stock_closes), len(spy_closes))
-
-        for days, label in [(30, "30d"), (90, "90d")]:
-            if min_len > days:
-                stock_ret = (float(stock_closes[-1]) - float(stock_closes[-(days + 1)])) / float(stock_closes[-(days + 1)]) * 100
-                spy_ret = (float(spy_closes[-1]) - float(spy_closes[-(days + 1)])) / float(spy_closes[-(days + 1)]) * 100
-                alpha = round(stock_ret - spy_ret, 2)
-                result[f"alpha_vs_spy_{label}"] = alpha
-                result[f"spy_return_{label}"] = round(spy_ret, 2)
-            else:
-                result[f"alpha_vs_spy_{label}"] = "N/A"
-                result[f"spy_return_{label}"] = "N/A"
-
-        return result
-
-    except Exception:
+async def _fetch_relative_strength(stock_closes: np.ndarray) -> dict:
+    """計算個股 vs SPY 的相對強弱（30/90 日 alpha）。"""
+    spy_rows = await fetch_fmp_history("SPY", days=252)
+    if not spy_rows:
         return {"relative_strength_vs_spy": "N/A"}
+
+    spy_closes = np.array([float(r["close"]) for r in spy_rows])
+    min_len = min(len(stock_closes), len(spy_closes))
+
+    out = {}
+    for days, label in [(30, "30d"), (90, "90d")]:
+        if min_len > days:
+            stock_ret = (
+                float(stock_closes[-1]) - float(stock_closes[-(days + 1)])
+            ) / float(stock_closes[-(days + 1)]) * 100
+            spy_ret = (
+                float(spy_closes[-1]) - float(spy_closes[-(days + 1)])
+            ) / float(spy_closes[-(days + 1)]) * 100
+            out[f"alpha_vs_spy_{label}"] = round(stock_ret - spy_ret, 2)
+            out[f"spy_return_{label}"] = round(spy_ret, 2)
+        else:
+            out[f"alpha_vs_spy_{label}"] = "N/A"
+            out[f"spy_return_{label}"] = "N/A"
+
+    return out
 
 
 def _calc_support_resistance(
@@ -141,28 +107,17 @@ def _calc_support_resistance(
     highs: np.ndarray,
     lows: np.ndarray,
 ) -> dict:
-    """
-    計算支撐壓力位。
-    方法：
-    1. 近 20 日最低點 → 短期支撐
-    2. 近 60 日最低點 → 中期支撐
-    3. 近 20 日最高點 → 短期壓力
-    4. 近 60 日最高點 → 中期壓力
-    5. SMA20, SMA50 作為動態支撐壓力參考
-    """
+    """近 20/60 日高低 + SMA20/SMA50 動態支撐壓力。"""
     sr = {}
 
-    # 短期（20 日）
     if len(lows) >= 20:
         sr["support_20d"] = round(float(np.min(lows[-20:])), 2)
         sr["resistance_20d"] = round(float(np.max(highs[-20:])), 2)
 
-    # 中期（60 日）
     if len(lows) >= 60:
         sr["support_60d"] = round(float(np.min(lows[-60:])), 2)
         sr["resistance_60d"] = round(float(np.max(highs[-60:])), 2)
 
-    # 動態均線支撐壓力
     if len(closes) >= 20:
         sma20 = round(float(np.mean(closes[-20:])), 2)
         sr["sma20"] = sma20

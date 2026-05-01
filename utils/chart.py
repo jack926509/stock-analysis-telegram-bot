@@ -1,47 +1,50 @@
 """
 K 線圖生成模組
-使用 mplfinance 繪製 K 線圖 + 均線，輸出為 PNG 圖片供 Telegram 發送。
+從 FMP 抓 OHLCV，組成 DataFrame 後用 mplfinance 繪圖輸出 PNG。
 """
 
 import asyncio
 import io
 import logging
 
-import yfinance as yf
 import mplfinance as mpf
+import pandas as pd
+
+from fetchers.fmp_fetcher import fetch_fmp_history
 
 logger = logging.getLogger(__name__)
 
 
 async def generate_chart(ticker: str, days: int = 60) -> io.BytesIO | None:
-    """
-    生成 K 線圖。
-
-    Args:
-        ticker: 股票代碼
-        days: 顯示天數
-
-    Returns:
-        BytesIO 圖片 buffer，失敗回傳 None
-    """
+    """生成 K 線圖。失敗回 None。"""
     try:
-        return await asyncio.to_thread(_render_chart, ticker, days)
+        rows = await fetch_fmp_history(ticker.upper(), days=days + 30)
+        if not rows or len(rows) < 10:
+            return None
+        return await asyncio.to_thread(_render_chart, ticker, rows, days)
     except Exception as e:
         logger.warning(f"[{ticker}] K 線圖生成失敗: {e}")
         return None
 
 
-def _render_chart(ticker: str, days: int) -> io.BytesIO | None:
-    stock = yf.Ticker(ticker.upper())
-    hist = stock.history(period=f"{days + 30}d", interval="1d")
+def _render_chart(ticker: str, rows: list[dict], days: int) -> io.BytesIO | None:
+    df = pd.DataFrame(
+        [
+            {
+                "Date": r["date"],
+                "Open": float(r["open"]),
+                "High": float(r["high"]),
+                "Low": float(r["low"]),
+                "Close": float(r["close"]),
+                "Volume": float(r.get("volume") or 0),
+            }
+            for r in rows
+        ]
+    )
+    df["Date"] = pd.to_datetime(df["Date"])
+    df = df.set_index("Date").sort_index()
+    df = df.tail(days)
 
-    if hist is None or hist.empty or len(hist) < 10:
-        return None
-
-    # 取最後 N 天
-    hist = hist.tail(days)
-
-    # 樣式
     mc = mpf.make_marketcolors(
         up="#26a69a", down="#ef5350",
         edge="inherit",
@@ -65,7 +68,7 @@ def _render_chart(ticker: str, days: int) -> io.BytesIO | None:
 
     buf = io.BytesIO()
     fig, axes = mpf.plot(
-        hist,
+        df,
         type="candle",
         style=style,
         volume=True,
@@ -76,10 +79,8 @@ def _render_chart(ticker: str, days: int) -> io.BytesIO | None:
         tight_layout=True,
     )
 
-    # 加圖例
-    ax_main = axes[0]
-    ax_main.legend(
-        [f"MA5", f"MA20", f"MA60"],
+    axes[0].legend(
+        ["MA5", "MA20", "MA60"],
         loc="upper left",
         fontsize=8,
         facecolor="#1a1a2e",

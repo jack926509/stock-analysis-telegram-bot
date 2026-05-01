@@ -30,7 +30,6 @@ from telegram.constants import ChatAction, ParseMode
 from config import Config
 from fetchers.finnhub_fetcher import fetch_finnhub_quote
 from fetchers.fmp_fetcher import fetch_fmp_fundamentals, fetch_fmp_batch_prices
-from fetchers.yfinance_fetcher import fetch_yfinance_fundamentals
 from fetchers.tavily_fetcher import fetch_tavily_news
 from fetchers.tradingview_fetcher import fetch_tradingview_analysis
 from fetchers.history_fetcher import fetch_history_analysis
@@ -60,7 +59,7 @@ _analysis_semaphore = asyncio.Semaphore(3)
 
 # ── 超時設定（秒）──
 FETCH_TIMEOUT = 45
-EXTENDED_FETCH_TIMEOUT = 60  # yfinance 重試最多 21s + 其他數據源
+EXTENDED_FETCH_TIMEOUT = 60  # 多數據源並行 + 重試 buffer
 AI_TIMEOUT = 90
 
 # ── Ticker 驗證：允許字母與數字（ETF / share class 支援）──
@@ -229,7 +228,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "<b>🧭 其他</b>\n"
         "<code>/start</code> 歡迎訊息 · <code>/help</code> 本手冊\n"
         "\n"
-        "📡 資料：Finnhub · FMP · yfinance · TradingView · Tavily · SEC EDGAR\n"
+        "📡 資料：Finnhub · FMP · TradingView · Tavily · SEC EDGAR\n"
         "🛡️ 反幻覺：所有 AI 分析皆需數據佐證，缺失即標 N/A"
     )
     await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
@@ -814,7 +813,7 @@ async def _execute_analysis(chat_id: int, ticker: str, bot) -> None:
         # ── Step 1: 並行抓取基礎數據（帶 raw 快取）──
         cached_raw = raw_cache.get(f"{ticker}:base")
         if cached_raw:
-            finnhub_data, yfinance_data, tradingview_data = cached_raw
+            finnhub_data, fundamentals_data, tradingview_data = cached_raw
             logger.info(f"[{ticker}] 使用 raw cache 基礎數據")
         else:
             logger.info(f"[{ticker}] 開始並行抓取數據...")
@@ -828,31 +827,16 @@ async def _execute_analysis(chat_id: int, ticker: str, bot) -> None:
                 timeout=FETCH_TIMEOUT,
             )
             finnhub_data = _ensure_dict(results[0], "Finnhub")
-            fmp_data = _ensure_dict(results[1], "FMP")
+            fundamentals_data = _ensure_dict(results[1], "FMP")
             tradingview_data = _ensure_dict(results[2], "TradingView")
 
-            # FMP primary → yfinance fallback
-            if "error" in fmp_data:
-                logger.warning(f"[{ticker}] FMP 失敗，切換 yfinance 備援")
-                try:
-                    yfinance_data = await asyncio.wait_for(
-                        fetch_yfinance_fundamentals(ticker),
-                        timeout=30,
-                    )
-                    yfinance_data = _ensure_dict(yfinance_data, "yfinance")
-                except Exception as yf_err:
-                    logger.error(f"[{ticker}] yfinance 備援也失敗: {yf_err}")
-                    yfinance_data = fmp_data
-            else:
-                yfinance_data = fmp_data
-
-            raw_cache.set(f"{ticker}:base", (finnhub_data, yfinance_data, tradingview_data))
-            logger.info(f"[{ticker}] 基礎數據抓取完成 (源: {yfinance_data.get('source', '?')})")
+            raw_cache.set(f"{ticker}:base", (finnhub_data, fundamentals_data, tradingview_data))
+            logger.info(f"[{ticker}] 基礎數據抓取完成 (源: {fundamentals_data.get('source', '?')})")
 
         # ── Step 1.5: 擴展數據（Tavily + 歷史 + 同業 + 分析師 + 內部人 + EPS + 宏觀）──
-        company_name = yfinance_data.get("company_name", "")
-        sector = yfinance_data.get("sector", "")
-        industry = yfinance_data.get("industry", "")
+        company_name = fundamentals_data.get("company_name", "")
+        sector = fundamentals_data.get("sector", "")
+        industry = fundamentals_data.get("industry", "")
 
         extended_tasks = [fetch_tavily_news(ticker, company_name)]
         task_labels = ["Tavily"]
@@ -903,7 +887,7 @@ async def _execute_analysis(chat_id: int, ticker: str, bot) -> None:
         # ── Step 1.6: 12 維度量化信號共識 ──
         signals_data = compute_signals(
             finnhub_data=finnhub_data,
-            yfinance_data=yfinance_data,
+            fundamentals_data=fundamentals_data,
             tradingview_data=tradingview_data,
             history_data=history_data if history_data and "error" not in history_data else None,
             peer_data=peer_data if peer_data and "error" not in peer_data else None,
@@ -936,7 +920,7 @@ async def _execute_analysis(chat_id: int, ticker: str, bot) -> None:
         try:
             ai_analysis = await asyncio.wait_for(
                 analyze_stock(
-                    ticker, finnhub_data, yfinance_data, tavily_data,
+                    ticker, finnhub_data, fundamentals_data, tavily_data,
                     tradingview_data, history_data, peer_data,
                     analyst_data, insider_data, earnings_data,
                     macro_data, signals_data,
@@ -950,7 +934,7 @@ async def _execute_analysis(chat_id: int, ticker: str, bot) -> None:
 
         # ── Step 3: 格式化報告 ──
         report = format_report(
-            ticker, finnhub_data, yfinance_data, tavily_data,
+            ticker, finnhub_data, fundamentals_data, tavily_data,
             tradingview_data, ai_analysis, history_data, peer_data,
             signals_data=signals_data,
             analyst_data=analyst_data,

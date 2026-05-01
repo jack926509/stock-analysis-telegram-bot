@@ -1,16 +1,14 @@
 """
 同業比較模組
-使用 yfinance 取得同產業公司數據，進行橫向對比。
+使用 FMP profile + key-metrics-ttm 取得同產業公司關鍵指標進行橫向對比。
 """
 
 import asyncio
 
-import yfinance as yf
-
-from utils.retry import retry_async_call
+from fetchers.fmp_fetcher import _fetch_fmp_json
 
 
-# 各產業代表性公司對照（用於找不到 peer 時的 fallback）
+# 各產業代表性公司對照（找不到 peer 時的 fallback）
 SECTOR_LEADERS = {
     "Technology": ["AAPL", "MSFT", "GOOGL", "NVDA", "META"],
     "Communication Services": ["GOOGL", "META", "DIS", "NFLX", "T"],
@@ -27,42 +25,25 @@ SECTOR_LEADERS = {
 
 
 async def fetch_peer_comparison(ticker: str, sector: str = "", industry: str = "") -> dict:
-    """
-    取得同業比較數據。
-
-    Args:
-        ticker: 目標股票代碼
-        sector: 產業大類
-        industry: 細分產業
-
-    Returns:
-        dict: 包含同業比較指標
-    """
+    """取得同業比較數據（最多 4 家代表股）。"""
     try:
-        # 選擇同業公司
         peers = _get_peers(ticker.upper(), sector)
         if not peers:
-            return {
-                "source": "peer_comparison",
-                "error": "無法找到同業公司進行比較",
-            }
+            return {"source": "peer_comparison", "error": "無法找到同業公司進行比較"}
 
-        # 並行抓取同業數據
-        tasks = [_fetch_peer_metrics(p) for p in peers]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        results = await asyncio.gather(
+            *[_fetch_peer_metrics(p) for p in peers],
+            return_exceptions=True,
+        )
 
-        peer_data = []
-        for p, r in zip(peers, results):
-            if isinstance(r, dict) and "error" not in r:
-                peer_data.append(r)
+        peer_data = [
+            r for r in results
+            if isinstance(r, dict) and "error" not in r
+        ]
 
         if not peer_data:
-            return {
-                "source": "peer_comparison",
-                "error": "同業數據全部取得失敗",
-            }
+            return {"source": "peer_comparison", "error": "同業數據全部取得失敗"}
 
-        # 計算同業平均值
         avg_pe = _avg([d.get("pe") for d in peer_data])
         avg_fwd_pe = _avg([d.get("forward_pe") for d in peer_data])
         avg_margin = _avg([d.get("profit_margin") for d in peer_data])
@@ -81,10 +62,7 @@ async def fetch_peer_comparison(ticker: str, sector: str = "", industry: str = "
         }
 
     except Exception as e:
-        return {
-            "source": "peer_comparison",
-            "error": f"同業比較錯誤: {str(e)}",
-        }
+        return {"source": "peer_comparison", "error": f"同業比較錯誤: {e}"}
 
 
 def _get_peers(ticker: str, sector: str) -> list[str]:
@@ -92,47 +70,41 @@ def _get_peers(ticker: str, sector: str) -> list[str]:
     if sector and sector in SECTOR_LEADERS:
         peers = [p for p in SECTOR_LEADERS[sector] if p != ticker]
     else:
-        # 預設用大盤指標股
         peers = [p for p in ["AAPL", "MSFT", "GOOGL", "AMZN"] if p != ticker]
     return peers[:4]
 
 
 async def _fetch_peer_metrics(ticker: str) -> dict:
-    """抓取單一公司的關鍵比較指標。"""
+    """從 FMP 抓單一公司的同業比較指標。"""
     try:
-        stock = yf.Ticker(ticker)
-        info = await retry_async_call(
-            asyncio.to_thread, lambda: stock.info,
-            source_name=f"Peer-{ticker}",
+        profile_data, metrics_data = await asyncio.gather(
+            _fetch_fmp_json("profile", ticker),
+            _fetch_fmp_json("key-metrics-ttm", ticker),
         )
-
-        if not info:
-            return {"ticker": ticker, "error": "無數據"}
-
-        pe = info.get("trailingPE")
-        fwd_pe = info.get("forwardPE")
-        margin = info.get("profitMargins")
-        growth = info.get("revenueGrowth")
-        mcap = info.get("marketCap")
-        eps = info.get("trailingEps")
-
-        return {
-            "ticker": ticker,
-            "company_name": info.get("shortName", ticker),
-            "pe": pe if pe else None,
-            "forward_pe": fwd_pe if fwd_pe else None,
-            "profit_margin": margin if margin else None,
-            "revenue_growth": growth if growth else None,
-            "market_cap": mcap if mcap else None,
-            "eps": eps if eps else None,
-        }
-
     except Exception as e:
         return {"ticker": ticker, "error": str(e)}
 
+    profile = profile_data[0] if isinstance(profile_data, list) and profile_data else {}
+    metrics = metrics_data[0] if isinstance(metrics_data, list) and metrics_data else {}
+
+    if not profile and not metrics:
+        return {"ticker": ticker, "error": "無數據"}
+
+    return {
+        "ticker": ticker,
+        "company_name": profile.get("companyName") or ticker,
+        "pe": metrics.get("peRatioTTM"),
+        # FMP 沒有 forward PE，用 TTM PE 充數讓平均仍可計算
+        "forward_pe": metrics.get("peRatioTTM"),
+        "profit_margin": metrics.get("netProfitMarginTTM"),
+        "revenue_growth": metrics.get("revenueGrowthTTM"),
+        "market_cap": profile.get("mktCap"),
+        "eps": profile.get("eps") or metrics.get("netIncomePerShareTTM"),
+    }
+
 
 def _avg(values: list) -> float | None:
-    """計算非 None 值的平均。"""
+    """計算非 None 數值的平均。"""
     valid = [v for v in values if v is not None and isinstance(v, (int, float))]
     if not valid:
         return None

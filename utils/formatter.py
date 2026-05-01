@@ -111,7 +111,7 @@ DIV_BOLD = "━━━━━━━━━━━━━━━━━━━━━━�
 def format_report(
     ticker: str,
     finnhub_data: dict,
-    yfinance_data: dict,
+    fundamentals_data: dict,
     tavily_data: dict,
     tradingview_data: dict,
     ai_analysis: str,
@@ -128,7 +128,7 @@ def format_report(
     # ════════════════════════════════════════
     # 1. HEADER + VERDICT
     # ════════════════════════════════════════
-    yf = yfinance_data
+    yf = fundamentals_data
     fh = finnhub_data
     tv = tradingview_data
 

@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from config import Config
 from fetchers.finnhub_fetcher import fetch_finnhub_quote
 from fetchers.tavily_fetcher import fetch_tavily_news
-from fetchers.yfinance_fetcher import fetch_yfinance_fundamentals
+from fetchers.fmp_fetcher import fetch_fmp_fundamentals
 from fetchers.tradingview_fetcher import fetch_tradingview_analysis
 from app.ai.planner import plan_newsletter
 from app.ai.writer import write_newsletter
@@ -108,7 +108,7 @@ async def _fetch_focus_stocks(tickers: list[str]) -> dict:
     """抓取重點個股的基本面 + 技術面數據。"""
     tasks = []
     for t in tickers[:3]:  # 最多 3 檔避免過慢
-        tasks.append(fetch_yfinance_fundamentals(t))
+        tasks.append(fetch_fmp_fundamentals(t))
         tasks.append(fetch_tradingview_analysis(t))
 
     results = await asyncio.gather(*tasks, return_exceptions=True)
