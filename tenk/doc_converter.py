@@ -1,3 +1,11 @@
+"""
+SEC 財報 HTM → markdown 轉換。
+
+策略：BeautifulSoup 處理 iXBRL（SEC 標準格式，唯一保證可用路徑）。
+LlamaParse / MarkItDown 為選用 fallback，套件未裝則跳過，
+為部署輕量化已從 requirements 移除。
+"""
+
 import re
 from pathlib import Path
 
@@ -12,34 +20,36 @@ def convert_to_markdown(doc_path: str | Path) -> str:
     if cache_path.exists():
         return cache_path.read_text(encoding="utf-8")
 
-    md_text = _llamaparse(doc_path) or _html_to_text_fallback(doc_path) or _markitdown_fallback(doc_path)
+    md_text = (
+        _llamaparse(doc_path)
+        or _html_to_text_fallback(doc_path)
+        or _markitdown_fallback(doc_path)
+    )
+    if md_text is None:
+        raise RuntimeError(
+            f"無法轉換 {doc_path.name}：非 SEC HTM 格式且未安裝 markitdown / llama-parse"
+        )
+
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     cache_path.write_text(md_text, encoding="utf-8")
     return md_text
 
 
 def _llamaparse(doc_path: Path) -> str | None:
-    api_key = Config.LLAMA_CLOUD_API_KEY
-    if not api_key:
+    if not Config.LLAMA_CLOUD_API_KEY:
         return None
     try:
         from llama_parse import LlamaParse
-
+    except ImportError:
+        return None
+    try:
         docs = LlamaParse(
-            api_key=api_key, result_type="markdown", verbose=False
+            api_key=Config.LLAMA_CLOUD_API_KEY,
+            result_type="markdown",
+            verbose=False,
         ).load_data(str(doc_path))
         md_text = "\n\n".join(doc.text for doc in docs)
-        # 驗證 header 數量：至少要有 3 個 Item header
-        if (
-            len(
-                re.findall(
-                    r"^#{1,3}\s*item\s+\d",
-                    md_text,
-                    re.MULTILINE | re.IGNORECASE,
-                )
-            )
-            < 3
-        ):
+        if len(re.findall(r"^#{1,3}\s*item\s+\d", md_text, re.MULTILINE | re.IGNORECASE)) < 3:
             return None
         return md_text
     except Exception:
@@ -47,110 +57,62 @@ def _llamaparse(doc_path: Path) -> str | None:
 
 
 def _strip_ixbrl(html: str) -> str:
-    """Strip inline XBRL metadata from SEC filing HTML, keeping only visible text.
-    
-    SEC 10-K filings use inline XBRL (iXBRL) format where:
-    - <ix:header>, <ix:references>, <ix:resources> contain XBRL metadata
-    - <ix:nonNumeric>, <ix:nonFraction> wrap actual text with XBRL attributes
-    - The actual content is in the text nodes of these elements
-    
-    This function extracts just the human-readable text.
-    """
-    # Remove hidden XBRL sections entirely
-    html = re.sub(r'<ix:header>.*?</ix:header>', '', html, flags=re.DOTALL)
-    html = re.sub(r'<ix:references>.*?</ix:references>', '', html, flags=re.DOTALL)
-    html = re.sub(r'<ix:resources>.*?</ix:resources>', '', html, flags=re.DOTALL)
-    
-    # Remove style and script tags
-    html = re.sub(r'<style[^>]*>.*?</style>', '', html, flags=re.DOTALL | re.IGNORECASE)
-    html = re.sub(r'<script[^>]*>.*?</script>', '', html, flags=re.DOTALL | re.IGNORECASE)
-    
-    # Replace ix:nonNumeric/ix:nonFraction with just their text content
-    # These wrap actual text like: <ix:nonNumeric ...>some text</ix:nonNumeric>
-    html = re.sub(r'<ix:nonNumeric[^>]*>(.*?)</ix:nonNumeric>', r'\1', html, flags=re.DOTALL)
-    html = re.sub(r'<ix:nonFraction[^>]*>(.*?)</ix:nonFraction>', r'\1', html, flags=re.DOTALL)
-    
-    # Remove any remaining ix:* tags but keep text
-    html = re.sub(r'<ix:[^>]+>', '', html)
-    html = re.sub(r'</ix:[^>]+>', '', html)
-    
-    # Remove xbrli:* tags (context/unit definitions)
-    html = re.sub(r'<xbrli:[^>]+>.*?</xbrli:[^>]+>', '', html, flags=re.DOTALL)
-    html = re.sub(r'</?xbrli:[^>]*>', '', html)
-    
-    # Remove link:* tags
-    html = re.sub(r'<link:[^>]+/>', '', html)
-    html = re.sub(r'</?link:[^>]*>', '', html)
-    
+    """剝除 SEC iXBRL metadata，留下可讀文字節點。"""
+    html = re.sub(r"<ix:header>.*?</ix:header>", "", html, flags=re.DOTALL)
+    html = re.sub(r"<ix:references>.*?</ix:references>", "", html, flags=re.DOTALL)
+    html = re.sub(r"<ix:resources>.*?</ix:resources>", "", html, flags=re.DOTALL)
+    html = re.sub(r"<style[^>]*>.*?</style>", "", html, flags=re.DOTALL | re.IGNORECASE)
+    html = re.sub(r"<script[^>]*>.*?</script>", "", html, flags=re.DOTALL | re.IGNORECASE)
+    html = re.sub(r"<ix:nonNumeric[^>]*>(.*?)</ix:nonNumeric>", r"\1", html, flags=re.DOTALL)
+    html = re.sub(r"<ix:nonFraction[^>]*>(.*?)</ix:nonFraction>", r"\1", html, flags=re.DOTALL)
+    html = re.sub(r"</?ix:[^>]+>", "", html)
+    html = re.sub(r"<xbrli:[^>]+>.*?</xbrli:[^>]+>", "", html, flags=re.DOTALL)
+    html = re.sub(r"</?xbrli:[^>]*>", "", html)
+    html = re.sub(r"</?link:[^>]*>", "", html)
     return html
 
 
 def _html_to_text_fallback(doc_path: Path) -> str | None:
-    """Convert SEC iXBRL HTML to readable text using BeautifulSoup.
-    
-    This is the primary fallback for HTM/HTML files since markitdown
-    doesn't handle iXBRL properly.
-    """
-    suffix = doc_path.suffix.lower()
-    if suffix not in (".htm", ".html"):
+    """SEC HTM/HTML 主要解析路徑（BeautifulSoup）。"""
+    if doc_path.suffix.lower() not in (".htm", ".html"):
         return None
-    
     try:
         from bs4 import BeautifulSoup
     except ImportError:
         return None
-    
-    html = doc_path.read_text(encoding="utf-8", errors="replace")
-    
-    # Strip XBRL metadata first
-    html = _strip_ixbrl(html)
-    
-    # Parse with BeautifulSoup
+
+    html = _strip_ixbrl(doc_path.read_text(encoding="utf-8", errors="replace"))
     soup = BeautifulSoup(html, "html.parser")
-    
-    # Remove remaining hidden elements
     for tag in soup.find_all(["style", "script", "head"]):
         tag.decompose()
-    
-    # Convert to text with some structure preservation
-    text = soup.get_text(separator="\n")
-    
-    # Clean up excessive whitespace
-    lines = []
-    for line in text.splitlines():
-        line = line.strip()
-        if line:
-            lines.append(line)
-    
-    result = "\n\n".join(lines)
-    
-    # Validate: should have at least some Item headers
-    item_count = len(re.findall(r'(?i)item\s+\d', result))
-    if item_count < 2:
-        return None  # Let markitdown try instead
-    
+
+    lines = [line.strip() for line in soup.get_text(separator="\n").splitlines()]
+    result = "\n\n".join(line for line in lines if line)
+
+    # 沒抓到至少 2 個 Item 標題視為解析失敗
+    if len(re.findall(r"(?i)item\s+\d", result)) < 2:
+        return None
     return result
 
 
-def _inject_anchor_markers(html: str) -> str:
-    """Convert empty anchor divs/spans to visible markers so markdown retains them."""
-    return re.sub(
-        r'<(div|span|a)\s+id="([^"]+)">\s*</\1>',
-        r'<\1 id="\2">[anchor:\2]</\1>',
-        html,
-    )
-
-
-def _markitdown_fallback(doc_path: Path) -> str:
-    from markitdown import MarkItDown
+def _markitdown_fallback(doc_path: Path) -> str | None:
+    try:
+        from markitdown import MarkItDown
+    except ImportError:
+        return None
 
     suffix = doc_path.suffix.lower()
     if suffix in (".htm", ".html"):
         import tempfile
-        html = doc_path.read_text(encoding="utf-8", errors="replace")
-        html = _inject_anchor_markers(html)
-        with tempfile.NamedTemporaryFile(suffix=".htm", mode="w",
-                                         encoding="utf-8", delete=False) as f:
+
+        html = re.sub(
+            r'<(div|span|a)\s+id="([^"]+)">\s*</\1>',
+            r'<\1 id="\2">[anchor:\2]</\1>',
+            doc_path.read_text(encoding="utf-8", errors="replace"),
+        )
+        with tempfile.NamedTemporaryFile(
+            suffix=".htm", mode="w", encoding="utf-8", delete=False
+        ) as f:
             f.write(html)
             tmp_path = f.name
         result = MarkItDown().convert(tmp_path).text_content

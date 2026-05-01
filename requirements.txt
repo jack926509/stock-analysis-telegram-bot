@@ -40,9 +40,6 @@ tavily-python==0.7.22
 tenacity>=8.0.0
 tqdm==4.67.3
 tradingview-ta==3.3.0
-# tenk (10-K / 10-Q deep analysis)
-markitdown[pdf]>=0.1.5
-llama-parse>=0.5.0
 typing-inspection==0.4.2
 typing_extensions==4.15.0
 tzdata==2025.3
