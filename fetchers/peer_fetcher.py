@@ -5,7 +5,7 @@
 
 import asyncio
 
-from fetchers.fmp_fetcher import _fetch_fmp_json
+from fetchers.fmp_fetcher import _fmp_get
 
 
 # 各產業代表性公司對照（找不到 peer 時的 fallback）
@@ -78,8 +78,8 @@ async def _fetch_peer_metrics(ticker: str) -> dict:
     """從 FMP 抓單一公司的同業比較指標。"""
     try:
         profile_data, metrics_data = await asyncio.gather(
-            _fetch_fmp_json("profile", ticker),
-            _fetch_fmp_json("key-metrics-ttm", ticker),
+            _fmp_get("profile", symbol=ticker),
+            _fmp_get("key-metrics-ttm", symbol=ticker),
         )
     except Exception as e:
         return {"ticker": ticker, "error": str(e)}
@@ -98,7 +98,7 @@ async def _fetch_peer_metrics(ticker: str) -> dict:
         "forward_pe": metrics.get("peRatioTTM"),
         "profit_margin": metrics.get("netProfitMarginTTM"),
         "revenue_growth": metrics.get("revenueGrowthTTM"),
-        "market_cap": profile.get("mktCap"),
+        "market_cap": profile.get("marketCap") or profile.get("mktCap"),
         "eps": profile.get("eps") or metrics.get("netIncomePerShareTTM"),
     }
 
