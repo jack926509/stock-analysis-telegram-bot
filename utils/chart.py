@@ -1,6 +1,6 @@
 """
 K 線圖生成模組
-從 FMP 抓 OHLCV，組成 DataFrame 後用 mplfinance 繪圖輸出 PNG。
+從 Stooq 抓 OHLCV，組成 DataFrame 後用 mplfinance 繪圖輸出 PNG。
 """
 
 import asyncio
@@ -10,7 +10,7 @@ import logging
 import mplfinance as mpf
 import pandas as pd
 
-from fetchers.fmp_fetcher import fetch_fmp_history
+from fetchers.stooq_fetcher import fetch_stooq_history
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 async def generate_chart(ticker: str, days: int = 60) -> io.BytesIO | None:
     """生成 K 線圖。失敗回 None。"""
     try:
-        rows = await fetch_fmp_history(ticker.upper(), days=days + 30)
+        rows = await fetch_stooq_history(ticker.upper(), days=days + 30)
         if not rows or len(rows) < 10:
             return None
         return await asyncio.to_thread(_render_chart, ticker, rows, days)

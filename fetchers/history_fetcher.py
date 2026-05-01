@@ -1,21 +1,21 @@
 """
 歷史數據回測模組
-使用 FMP /historical-price-full 取得日 K 線，計算近 30/60/90 天報酬率、
-波動率、支撐壓力位、相對 SPY 的 alpha。
+從 Stooq 抓日 K 線，計算近 30/60/90 天報酬率、波動率、
+支撐壓力位、相對 SPY 的 alpha。
 """
 
 import numpy as np
 
-from fetchers.fmp_fetcher import fetch_fmp_history
+from fetchers.stooq_fetcher import fetch_stooq_history
 
 
 async def fetch_history_analysis(ticker: str) -> dict:
     """抓取歷史數據並計算回測指標。"""
     try:
-        rows = await fetch_fmp_history(ticker.upper(), days=252)
+        rows = await fetch_stooq_history(ticker.upper(), days=252)
         if not rows or len(rows) < 10:
             return {
-                "source": "fmp_history",
+                "source": "stooq_history",
                 "error": f"無法取得 {ticker.upper()} 的歷史數據",
             }
 
@@ -26,7 +26,7 @@ async def fetch_history_analysis(ticker: str) -> dict:
         current_price = float(closes[-1])
 
         result = {
-            "source": "fmp_history",
+            "source": "stooq_history",
             "ticker": ticker.upper(),
             "data_points": len(closes),
         }
@@ -71,12 +71,12 @@ async def fetch_history_analysis(ticker: str) -> dict:
         return result
 
     except Exception as e:
-        return {"source": "fmp_history", "error": f"歷史數據錯誤: {e}"}
+        return {"source": "stooq_history", "error": f"歷史數據錯誤: {e}"}
 
 
 async def _fetch_relative_strength(stock_closes: np.ndarray) -> dict:
     """計算個股 vs SPY 的相對強弱（30/90 日 alpha）。"""
-    spy_rows = await fetch_fmp_history("SPY", days=252)
+    spy_rows = await fetch_stooq_history("SPY", days=252)
     if not spy_rows:
         return {"relative_strength_vs_spy": "N/A"}
 

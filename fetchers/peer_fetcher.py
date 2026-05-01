@@ -1,14 +1,14 @@
 """
 同業比較模組
-使用 FMP profile + key-metrics-ttm 取得同產業公司關鍵指標進行橫向對比。
+FMP profile（產業／市值）+ Finnhub metrics（PE/利潤率）做橫向對比。
 """
 
 import asyncio
 
+from fetchers.finnhub_fetcher import fetch_finnhub_metrics
 from fetchers.fmp_fetcher import _fmp_get
 
 
-# 各產業代表性公司對照（找不到 peer 時的 fallback）
 SECTOR_LEADERS = {
     "Technology": ["AAPL", "MSFT", "GOOGL", "NVDA", "META"],
     "Communication Services": ["GOOGL", "META", "DIS", "NFLX", "T"],
@@ -25,7 +25,7 @@ SECTOR_LEADERS = {
 
 
 async def fetch_peer_comparison(ticker: str, sector: str = "", industry: str = "") -> dict:
-    """取得同業比較數據（最多 4 家代表股）。"""
+    """同業比較（最多 4 家代表股）。"""
     try:
         peers = _get_peers(ticker.upper(), sector)
         if not peers:
@@ -36,10 +36,7 @@ async def fetch_peer_comparison(ticker: str, sector: str = "", industry: str = "
             return_exceptions=True,
         )
 
-        peer_data = [
-            r for r in results
-            if isinstance(r, dict) and "error" not in r
-        ]
+        peer_data = [r for r in results if isinstance(r, dict) and "error" not in r]
 
         if not peer_data:
             return {"source": "peer_comparison", "error": "同業數據全部取得失敗"}
@@ -57,8 +54,8 @@ async def fetch_peer_comparison(ticker: str, sector: str = "", industry: str = "
             "peer_details": peer_data,
             "sector_avg_pe": round(avg_pe, 2) if avg_pe else "N/A",
             "sector_avg_forward_pe": round(avg_fwd_pe, 2) if avg_fwd_pe else "N/A",
-            "sector_avg_profit_margin": round(avg_margin, 4) if avg_margin else "N/A",
-            "sector_avg_revenue_growth": round(avg_growth, 4) if avg_growth else "N/A",
+            "sector_avg_profit_margin": round(avg_margin, 2) if avg_margin else "N/A",
+            "sector_avg_revenue_growth": round(avg_growth, 2) if avg_growth else "N/A",
         }
 
     except Exception as e:
@@ -66,7 +63,6 @@ async def fetch_peer_comparison(ticker: str, sector: str = "", industry: str = "
 
 
 def _get_peers(ticker: str, sector: str) -> list[str]:
-    """取得同業公司列表（排除自身，最多 4 家）。"""
     if sector and sector in SECTOR_LEADERS:
         peers = [p for p in SECTOR_LEADERS[sector] if p != ticker]
     else:
@@ -75,36 +71,35 @@ def _get_peers(ticker: str, sector: str) -> list[str]:
 
 
 async def _fetch_peer_metrics(ticker: str) -> dict:
-    """從 FMP 抓單一公司的同業比較指標。"""
+    """單一公司：FMP profile + Finnhub metrics。"""
     try:
-        profile_data, metrics_data = await asyncio.gather(
+        profile_data, metrics = await asyncio.gather(
             _fmp_get("profile", symbol=ticker),
-            _fmp_get("key-metrics-ttm", symbol=ticker),
+            fetch_finnhub_metrics(ticker),
         )
     except Exception as e:
         return {"ticker": ticker, "error": str(e)}
 
     profile = profile_data[0] if isinstance(profile_data, list) and profile_data else {}
-    metrics = metrics_data[0] if isinstance(metrics_data, list) and metrics_data else {}
 
     if not profile and not metrics:
         return {"ticker": ticker, "error": "無數據"}
 
+    pe = metrics.get("peTTM") or metrics.get("peExclExtraTTM")
     return {
         "ticker": ticker,
         "company_name": profile.get("companyName") or ticker,
-        "pe": metrics.get("peRatioTTM"),
-        # FMP 沒有 forward PE，用 TTM PE 充數讓平均仍可計算
-        "forward_pe": metrics.get("peRatioTTM"),
+        "pe": pe,
+        # Finnhub 沒有 forward PE，用 TTM PE 充數讓平均仍可計算
+        "forward_pe": pe,
         "profit_margin": metrics.get("netProfitMarginTTM"),
-        "revenue_growth": metrics.get("revenueGrowthTTM"),
+        "revenue_growth": metrics.get("revenueGrowthTTMYoy"),
         "market_cap": profile.get("marketCap") or profile.get("mktCap"),
-        "eps": profile.get("eps") or metrics.get("netIncomePerShareTTM"),
+        "eps": metrics.get("epsTTM") or profile.get("eps"),
     }
 
 
 def _avg(values: list) -> float | None:
-    """計算非 None 數值的平均。"""
     valid = [v for v in values if v is not None and isinstance(v, (int, float))]
     if not valid:
         return None

@@ -228,7 +228,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "<b>🧭 其他</b>\n"
         "<code>/start</code> 歡迎訊息 · <code>/help</code> 本手冊\n"
         "\n"
-        "📡 資料：Finnhub · FMP · TradingView · Tavily · SEC EDGAR\n"
+        "📡 資料：Finnhub · FMP · Stooq · TradingView · Tavily · SEC EDGAR\n"
         "🛡️ 反幻覺：所有 AI 分析皆需數據佐證，缺失即標 N/A"
     )
     await update.message.reply_text(msg, parse_mode=ParseMode.HTML)

@@ -126,7 +126,7 @@ def _build_context(
         "=== 即時股價數據 (來源: Finnhub) ===",
         _compact(finnhub_data),
         "",
-        "=== 基本面數據 (來源: FMP) ===",
+        "=== 基本面數據 (來源: FMP profile + Finnhub metrics) ===",
         _compact(fundamentals_data),
         "",
         "=== 最新新聞 (來源: Tavily) ===",
@@ -139,14 +139,14 @@ def _build_context(
     if history_data and "error" not in history_data:
         context_parts.extend([
             "",
-            "=== 歷史回測數據 (來源: FMP 歷史) ===",
+            "=== 歷史回測數據 (來源: Stooq 日 K) ===",
             _compact(history_data),
         ])
 
     if peer_data and "error" not in peer_data:
         context_parts.extend([
             "",
-            "=== 同業比較數據 (來源: FMP 同業) ===",
+            "=== 同業比較數據 (來源: FMP profile + Finnhub metrics) ===",
             _compact(peer_data),
         ])
 

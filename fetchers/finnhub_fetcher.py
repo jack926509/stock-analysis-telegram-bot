@@ -1,15 +1,18 @@
 """
 Finnhub 即時股價數據抓取模組
-使用 Finnhub API 取得即時報價資訊。
+使用 Finnhub API 取得即時報價與基本面指標。
 """
 
 import asyncio
+import logging
 from datetime import datetime, timezone
 
 import finnhub
 
 from config import Config
 from utils.retry import retry_async_call
+
+logger = logging.getLogger(__name__)
 
 # 後端優化：共用 client 實例，避免每次請求重建
 _finnhub_client: finnhub.Client | None = None
@@ -77,3 +80,19 @@ async def fetch_finnhub_quote(ticker: str) -> dict:
             "source": "Finnhub",
             "error": f"Finnhub API 錯誤: {str(e)}",
         }
+
+
+async def fetch_finnhub_metrics(ticker: str) -> dict:
+    """
+    Finnhub 免費版基本面指標（補 FMP Premium key-metrics-ttm 缺口）。
+    回傳 metric 子物件；失敗回 {}。
+    """
+    if not Config.FINNHUB_API_KEY:
+        return {}
+    try:
+        client = _get_client()
+        data = await asyncio.to_thread(client.company_basic_financials, ticker.upper(), "all")
+        return data.get("metric", {}) if isinstance(data, dict) else {}
+    except Exception as e:
+        logger.warning(f"[Finnhub] basic_financials {ticker} 失敗: {e}")
+        return {}

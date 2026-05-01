@@ -1,17 +1,17 @@
 """
 Financial Modeling Prep (FMP) 數據抓取模組
-- 走 FMP /stable/ API（免費版可用；舊 /api/v3/ 已棄用，常 403）
-- 提供 fundamentals / quote / history / batch_prices
+- 走 FMP /stable/ 免費端點：profile / quote / batch-quote
+- key-metrics / ratios / historical 屬 Premium，已分流到 Finnhub 與 Stooq
 - 免費版每日 250 次請求
 """
 
 import asyncio
 import logging
-from datetime import datetime, timedelta, timezone
 
 import httpx
 
 from config import Config
+from fetchers.finnhub_fetcher import fetch_finnhub_metrics
 from utils.retry import retry_async_call
 
 logger = logging.getLogger(__name__)
@@ -54,11 +54,12 @@ def _format_large_number(value) -> str:
         return "N/A"
 
 
-def _format_percentage(value) -> str:
-    if value is None or value == "N/A":
+def _fmt_pct_finnhub(value) -> str:
+    """Finnhub 已是百分比數字（25.5 = 25.5%），直接加 %。"""
+    if value is None:
         return "N/A"
     try:
-        return f"{float(value) * 100:.2f}%"
+        return f"{float(value):.2f}%"
     except (ValueError, TypeError):
         return "N/A"
 
@@ -67,13 +68,22 @@ def _safe(val, fallback="N/A"):
     return val if val is not None else fallback
 
 
+def _ratio_to_pct(val):
+    """Finnhub D/E 是倍數（1.5），formatter 期望百分比（150）。"""
+    if val is None:
+        return None
+    try:
+        return round(float(val) * 100, 2)
+    except (ValueError, TypeError):
+        return None
+
+
 # ── 共用 HTTP helper ──
 
 
 async def _fmp_get(endpoint: str, **params) -> list | dict:
     """
-    FMP /stable/{endpoint} GET。raises HTTPStatusError / ValueError on failure。
-    錯誤訊息含 endpoint 名與 status，方便排查 403/404/429。
+    FMP /stable/{endpoint} GET。錯誤訊息含 endpoint 名與 status。
     """
     url = f"{_BASE_URL}/{endpoint}"
     qs = {"apikey": Config.FMP_API_KEY}
@@ -98,28 +108,10 @@ async def _fmp_get(endpoint: str, **params) -> list | dict:
 # ── 基本面 ──
 
 
-async def _fetch_all_fmp_data(ticker: str) -> tuple[dict, dict, dict]:
-    """並行抓 profile + key-metrics-ttm + ratios-ttm。"""
-    profile_data, metrics_data, ratios_data = await asyncio.gather(
-        _fmp_get("profile", symbol=ticker),
-        _fmp_get("key-metrics-ttm", symbol=ticker),
-        _fmp_get("ratios-ttm", symbol=ticker),
-    )
-
-    profile = profile_data[0] if isinstance(profile_data, list) and profile_data else {}
-    metrics = metrics_data[0] if isinstance(metrics_data, list) and metrics_data else {}
-    ratios = ratios_data[0] if isinstance(ratios_data, list) and ratios_data else {}
-
-    if not profile:
-        raise ValueError("FMP profile returned empty data")
-
-    return profile, metrics, ratios
-
-
 async def fetch_fmp_fundamentals(ticker: str) -> dict:
     """
-    FMP 基本面。輸出 shape 對應 formatter / signals / analyzer 期望的契約。
-    欄位名同時相容 stable（marketCap / lastDividend）與 legacy（mktCap / lastDiv）。
+    基本面：FMP profile（公司資訊）+ Finnhub metrics（財務指標）。
+    輸出 shape 對應 formatter / signals / analyzer 期望的契約。
     """
     ticker = ticker.upper()
 
@@ -127,27 +119,37 @@ async def fetch_fmp_fundamentals(ticker: str) -> dict:
         return {"source": "FMP", "error": "FMP_API_KEY 未設定"}
 
     try:
-        profile, metrics, ratios = await retry_async_call(
-            _fetch_all_fmp_data, ticker,
-            max_retries=2,
-            base_delay=2.0,
-            source_name="FMP",
+        profile_data, metrics = await asyncio.gather(
+            retry_async_call(
+                _fmp_get, "profile", symbol=ticker,
+                max_retries=2, base_delay=2.0, source_name="FMP_profile",
+            ),
+            fetch_finnhub_metrics(ticker),
         )
     except Exception as e:
-        logger.warning(f"[FMP] {ticker} 抓取失敗: {e}")
-        return {"source": "FMP", "error": f"FMP API 錯誤: {e}"}
+        logger.warning(f"[FMP] {ticker} profile 失敗: {e}")
+        return {"source": "FMP", "error": f"FMP profile 錯誤: {e}"}
 
-    raw_market_cap = _safe(profile.get("marketCap") or profile.get("mktCap"))
+    profile = profile_data[0] if isinstance(profile_data, list) and profile_data else {}
+    if not profile:
+        return {"source": "FMP", "error": "FMP profile 回傳空"}
+
+    raw_market_cap = profile.get("marketCap") or profile.get("mktCap")
     last_div = profile.get("lastDividend") or profile.get("lastDiv")
     price = profile.get("price")
 
-    if last_div not in (None, 0) and price:
+    div_yield = "N/A"
+    fh_div_yield = metrics.get("currentDividendYieldTTM")
+    if fh_div_yield is not None:
+        try:
+            div_yield = f"{float(fh_div_yield):.2f}%"
+        except (ValueError, TypeError):
+            pass
+    elif last_div not in (None, 0) and price:
         try:
             div_yield = f"{(float(last_div) / float(price)) * 100:.2f}%"
         except (ValueError, TypeError, ZeroDivisionError):
-            div_yield = "N/A"
-    else:
-        div_yield = "N/A"
+            pass
 
     summary = profile.get("description") or "N/A"
     if summary != "N/A" and len(summary) > 300:
@@ -155,8 +157,19 @@ async def fetch_fmp_fundamentals(ticker: str) -> dict:
 
     range_str = profile.get("range") or ""
     range_parts = [p.strip() for p in range_str.split("-")] if range_str else []
-    low_52w = range_parts[0] if len(range_parts) == 2 else "N/A"
-    high_52w = range_parts[1] if len(range_parts) == 2 else "N/A"
+    if len(range_parts) == 2:
+        low_52w, high_52w = range_parts[0], range_parts[1]
+    else:
+        low_52w = _safe(metrics.get("52WeekLow"))
+        high_52w = _safe(metrics.get("52WeekHigh"))
+
+    avg_vol_10d = metrics.get("10DayAverageTradingVolume")
+    if avg_vol_10d is not None:
+        try:
+            # Finnhub 以百萬股為單位
+            avg_vol_10d = float(avg_vol_10d) * 1e6
+        except (ValueError, TypeError):
+            avg_vol_10d = None
 
     return {
         "source": "FMP",
@@ -164,43 +177,48 @@ async def fetch_fmp_fundamentals(ticker: str) -> dict:
         "company_name": _safe(profile.get("companyName")),
         "sector": _safe(profile.get("sector")),
         "industry": _safe(profile.get("industry")),
-        "market_cap_raw": raw_market_cap,
+        "market_cap_raw": _safe(raw_market_cap),
         "market_cap": _format_market_cap(raw_market_cap),
-        "pe_ratio": _safe(metrics.get("peRatioTTM")),
+        "pe_ratio": _safe(metrics.get("peTTM") or metrics.get("peExclExtraTTM")),
         "forward_pe": "N/A",
-        "eps": _safe(profile.get("eps") or metrics.get("netIncomePerShareTTM")),
-        "peg_ratio": _safe(ratios.get("pegRatioTTM")),
+        "eps": _safe(metrics.get("epsTTM") or profile.get("eps")),
+        "peg_ratio": _safe(metrics.get("pegTTM")),
         "dividend_yield": div_yield,
-        "profit_margin": _format_percentage(ratios.get("netProfitMarginTTM")),
-        "revenue_growth": _format_percentage(metrics.get("revenueGrowthTTM") or ratios.get("revenueGrowthTTM")),
-        "earnings_growth": _format_percentage(metrics.get("netIncomeGrowthTTM") or ratios.get("netIncomeGrowthTTM")),
+        "profit_margin": _fmt_pct_finnhub(metrics.get("netProfitMarginTTM")),
+        "revenue_growth": _fmt_pct_finnhub(metrics.get("revenueGrowthTTMYoy")),
+        "earnings_growth": _fmt_pct_finnhub(metrics.get("epsGrowthTTMYoy")),
         "52w_high": high_52w,
         "52w_low": low_52w,
         "50d_avg": "N/A",
         "200d_avg": "N/A",
         "volume": _format_large_number(profile.get("volAvg") or profile.get("averageVolume")),
         "avg_volume": _format_large_number(profile.get("volAvg") or profile.get("averageVolume")),
-        "avg_volume_10d": "N/A",
-        "beta": _safe(profile.get("beta")),
+        "avg_volume_10d": _format_large_number(avg_vol_10d),
+        "beta": _safe(profile.get("beta") or metrics.get("beta")),
         "short_ratio": "N/A",
         "short_pct_float": "N/A",
         "held_pct_insiders": "N/A",
         "held_pct_institutions": "N/A",
-        "revenue": _format_large_number(metrics.get("revenueTTM") or metrics.get("revenuePerShareTTM")),
-        "roe": _format_percentage(ratios.get("returnOnEquityTTM")),
-        "roa": _format_percentage(ratios.get("returnOnAssetsTTM")),
-        "operating_margin": _format_percentage(ratios.get("operatingProfitMarginTTM")),
-        "gross_margin": _format_percentage(ratios.get("grossProfitMarginTTM")),
-        "free_cash_flow": _format_large_number(metrics.get("freeCashFlowTTM")),
-        "operating_cash_flow": _format_large_number(metrics.get("operatingCashFlowTTM")),
-        "debt_to_equity": _safe(ratios.get("debtEquityRatioTTM")),
-        "current_ratio": _safe(ratios.get("currentRatioTTM")),
-        "total_debt": _format_large_number(metrics.get("totalDebtTTM")),
-        "total_cash": _format_large_number(metrics.get("cashAndCashEquivalentsTTM") or metrics.get("cashPerShareTTM")),
-        "price_to_book": _safe(ratios.get("priceToBookRatioTTM")),
-        "price_to_sales": _safe(ratios.get("priceToSalesRatioTTM")),
-        "enterprise_value": _format_large_number(metrics.get("enterpriseValueTTM")),
-        "ev_to_ebitda": _safe(metrics.get("evToEbitdaTTM") or ratios.get("enterpriseValueOverEBITDATTM")),
+        "revenue": "N/A",
+        "roe": _fmt_pct_finnhub(metrics.get("roeTTM")),
+        "roa": _fmt_pct_finnhub(metrics.get("roaTTM")),
+        "operating_margin": _fmt_pct_finnhub(metrics.get("operatingMarginTTM")),
+        "gross_margin": _fmt_pct_finnhub(metrics.get("grossMarginTTM")),
+        "free_cash_flow": "N/A",
+        "operating_cash_flow": "N/A",
+        "debt_to_equity": _safe(_ratio_to_pct(
+            metrics.get("totalDebt/totalEquityAnnual")
+            or metrics.get("longTermDebt/equityAnnual"),
+        )),
+        "current_ratio": _safe(
+            metrics.get("currentRatioAnnual") or metrics.get("currentRatioQuarterly"),
+        ),
+        "total_debt": "N/A",
+        "total_cash": "N/A",
+        "price_to_book": _safe(metrics.get("pbAnnual") or metrics.get("pbQuarterly")),
+        "price_to_sales": _safe(metrics.get("psAnnual") or metrics.get("psTTM")),
+        "enterprise_value": "N/A",
+        "ev_to_ebitda": "N/A",
         "earnings_date": "N/A",
         "business_summary": summary,
     }
@@ -220,44 +238,6 @@ async def fetch_fmp_quote(symbol: str) -> dict | None:
     except Exception as e:
         logger.debug(f"[FMP] quote {symbol} 失敗: {e}")
     return None
-
-
-# ── Historical OHLCV ──
-
-
-async def fetch_fmp_history(ticker: str, days: int = 252) -> list[dict] | None:
-    """
-    抓日 K 歷史。返回舊→新時序的 dict list：
-    {date, open, high, low, close, volume}
-    """
-    if not Config.FMP_API_KEY:
-        return None
-
-    # /stable/historical-price-eod/full 需要 from / to 日期
-    # 多取 50% 緩衝抵銷週末與假期
-    today = datetime.now(timezone.utc).date()
-    from_date = today - timedelta(days=int(days * 1.5))
-    try:
-        data = await _fmp_get(
-            "historical-price-eod/full",
-            symbol=ticker.upper(),
-            **{
-                "from": from_date.strftime("%Y-%m-%d"),
-                "to": today.strftime("%Y-%m-%d"),
-            },
-        )
-    except Exception as e:
-        logger.warning(f"[FMP] historical {ticker} 失敗: {e}")
-        return None
-
-    # stable 直接回 list；legacy 回 {symbol, historical: []}
-    rows = data if isinstance(data, list) else (data.get("historical") if isinstance(data, dict) else None)
-    if not isinstance(rows, list) or not rows:
-        return None
-
-    # 反轉成舊→新；裁掉超出 days 的部分
-    rows = list(reversed(rows))[-days:]
-    return rows
 
 
 # ── Finnhub 報價 fallback（給 batch_prices 用）──
@@ -308,7 +288,6 @@ async def _fetch_finnhub_quote_normalized(ticker: str) -> tuple[str, dict | None
 async def fetch_fmp_batch_prices(tickers: list[str]) -> dict[str, dict]:
     """
     Batch 即時報價：FMP /stable/batch-quote → Finnhub fallback。
-    返回 {ticker: {price, change, change_pct, ...}}
     """
     if not tickers:
         return {}
