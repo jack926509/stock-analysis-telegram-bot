@@ -141,6 +141,13 @@ def _pos52_bar(pos, length: int = 8) -> str:
     return "▌" * filled + "░" * (length - filled)
 
 
+def _progress_bar(percent: int, length: int = 10) -> str:
+    """進度條（▓ 已完成 / ░ 未完成）。"""
+    p = max(0, min(100, percent))
+    filled = round(p / 100 * length)
+    return "▓" * filled + "░" * (length - filled)
+
+
 def _earnings_days(earnings_str) -> int | None:
     """距離財報的整日數（0–7 才回傳；今日=0、明日=1）。FMP 格式：'2025-01-30T21:00:00.000+0000'。"""
     if not earnings_str or not isinstance(earnings_str, str) or len(earnings_str) < 10:
@@ -665,9 +672,16 @@ async def _run_scan(chat_id: int, user_id: int, bot) -> None:
         footer = "\n⚠️ 超過 10 檔，僅顯示前 10  |  ➜ /report 查看完整分析"
     lines.append(footer)
 
+    scan_keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🔄 強刷", callback_data="scanall"),
+            InlineKeyboardButton("📋 清單", callback_data="back_to_wl"),
+        ],
+    ])
     await loading.edit_text(
         "\n".join(lines),
         parse_mode=ParseMode.HTML,
+        reply_markup=scan_keyboard,
     )
 
 
@@ -702,6 +716,7 @@ async def chart_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await update.message.reply_photo(
         photo=chart_buf,
         caption=f"📈 {ticker} — 60 日 K 線圖（MA5 / MA20 / MA60）",
+        reply_markup=_chart_keyboard(ticker, 60),
     )
 
 
@@ -789,8 +804,17 @@ async def compare_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             lines.append(f"  市值: {cap_str}")
         lines.append("")
 
-    lines.append("➜ /report TICKER 查看單檔完整分析")
-    await loading.edit_text("\n".join(lines), parse_mode=ParseMode.HTML)
+    lines.append("點下方按鈕直接查看單檔完整分析")
+    report_buttons = [
+        InlineKeyboardButton(f"📊 {t}", callback_data=f"report:{t}")
+        for t in tickers
+    ]
+    keyboard_rows = [report_buttons[i:i + 3] for i in range(0, len(report_buttons), 3)]
+    await loading.edit_text(
+        "\n".join(lines),
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(keyboard_rows),
+    )
 
 
 # ══════════════════════════════════════════
@@ -803,9 +827,24 @@ async def _execute_analysis(chat_id: int, ticker: str, bot) -> None:
 
     loading_msg = await bot.send_message(
         chat_id=chat_id,
-        text=f"⏳ 分析 <b>{ticker}</b>…\n📡 並行抓取 10+ 數據源",
+        text=(
+            f"⏳ 分析 <b>{ticker}</b>…\n"
+            f"<code>{_progress_bar(10)}</code> 10%\n"
+            f"📡 即時報價 + 基本面 + 技術指標"
+        ),
         parse_mode=ParseMode.HTML,
     )
+
+    async def _update_progress(percent: int, body: str) -> None:
+        try:
+            await loading_msg.edit_text(
+                f"⏳ 分析 <b>{ticker}</b>…\n"
+                f"<code>{_progress_bar(percent)}</code> {percent}%\n"
+                f"{body}",
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception:
+            pass
 
     try:
         await bot.send_chat_action(chat_id, ChatAction.TYPING)
@@ -832,6 +871,11 @@ async def _execute_analysis(chat_id: int, ticker: str, bot) -> None:
 
             raw_cache.set(f"{ticker}:base", (finnhub_data, fundamentals_data, tradingview_data))
             logger.info(f"[{ticker}] 基礎數據抓取完成 (源: {fundamentals_data.get('source', '?')})")
+
+        await _update_progress(
+            35,
+            "✅ 即時報價 / 基本面 / 技術指標\n⏳ 擴展數據（同業 / 歷史 / 分析師 / 內部人 / 宏觀）",
+        )
 
         # ── Step 1.5: 擴展數據（Tavily + 歷史 + 同業 + 分析師 + 內部人 + EPS + 宏觀）──
         company_name = fundamentals_data.get("company_name", "")
@@ -903,16 +947,12 @@ async def _execute_analysis(chat_id: int, ticker: str, bot) -> None:
         )
         logger.info(f"[{ticker}] 所有數據抓取完成（{total_sources} 源），開始 AI 分析...")
 
-        try:
-            await loading_msg.edit_text(
-                f"⏳ 分析 <b>{ticker}</b>…\n"
-                f"✅ 數據抓取完成（{total_sources} 源）\n"
-                f"🧮 量化信號：{signals_data.get('consensus', 'N/A')}\n"
-                f"🤖 Claude 四觀點深度分析中",
-                parse_mode=ParseMode.HTML,
-            )
-        except Exception:
-            pass
+        await _update_progress(
+            70,
+            f"✅ 完成 {total_sources} 源數據抓取\n"
+            f"🧮 量化信號：{signals_data.get('consensus', 'N/A')}\n"
+            f"🤖 Claude 四觀點深度分析中",
+        )
 
         await bot.send_chat_action(chat_id, ChatAction.TYPING)
 
@@ -956,7 +996,8 @@ async def _execute_analysis(chat_id: int, ticker: str, bot) -> None:
                 await bot.send_photo(
                     chat_id=chat_id,
                     photo=chart_buf,
-                    caption=f"📈 {ticker.upper()} — 60 日 K 線圖（MA5/MA20/MA60）",
+                    caption=f"📈 {ticker.upper()} — 60 日 K 線圖（MA5 / MA20 / MA60）",
+                    reply_markup=_chart_keyboard(ticker.upper(), 60),
                 )
             except Exception as chart_err:
                 logger.warning(f"[{ticker}] K 線圖發送失敗: {chart_err}")
@@ -980,8 +1021,8 @@ async def _execute_analysis(chat_id: int, ticker: str, bot) -> None:
         logger.error(f"[{ticker}] 分析失敗: {e}", exc_info=True)
         error_msg = (
             f"❌ <b>{ticker}</b> 分析失敗\n"
-            f"<code>{_esc(str(e)[:200])}</code>\n"
-            f"稍後重試：<code>/report {ticker}</code>"
+            f"資料源暫時不可用，30 秒後重試：<code>/report {ticker}</code>\n"
+            f"若持續發生，輸入 /help 查看其他指令"
         )
         try:
             await loading_msg.edit_text(error_msg, parse_mode=ParseMode.HTML)
@@ -997,14 +1038,55 @@ async def _execute_analysis(chat_id: int, ticker: str, bot) -> None:
 # ══════════════════════════════════════════
 
 
-def _build_report_keyboard(ticker: str) -> InlineKeyboardMarkup:
-    """建立報告下方的互動按鈕。"""
-    return InlineKeyboardMarkup([
+_SEC_EDGAR_TPL = (
+    "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={t}"
+    "&type=10-K&dateb=&owner=include&count=40"
+)
+
+
+def _build_report_keyboard(ticker: str, watched: bool = False) -> InlineKeyboardMarkup:
+    """報告下方互動按鈕。watched=True 時隱藏「加入自選股」按鈕。"""
+    rows = [
         [
+            InlineKeyboardButton("📈 K 線", callback_data=f"chart:{ticker}:60"),
+            InlineKeyboardButton("📚 SEC", url=_SEC_EDGAR_TPL.format(t=ticker)),
+            InlineKeyboardButton("⚖️ 對比", callback_data=f"compare_hint:{ticker}"),
+        ],
+    ]
+    if watched:
+        rows.append([InlineKeyboardButton("🔄 重新分析", callback_data=f"refresh:{ticker}")])
+    else:
+        rows.append([
             InlineKeyboardButton("⭐ 加入自選股", callback_data=f"watch:{ticker}"),
             InlineKeyboardButton("🔄 重新分析", callback_data=f"refresh:{ticker}"),
+        ])
+    return InlineKeyboardMarkup(rows)
+
+
+_CHART_PERIODS = [(30, "30D"), (60, "60D"), (90, "90D"), (252, "1Y")]
+
+
+def _chart_keyboard(ticker: str, current: int = 60) -> InlineKeyboardMarkup:
+    """K 線圖週期切換 + 跳轉完整分析。"""
+    period_row = [
+        InlineKeyboardButton(
+            f"• {label}" if d == current else label,
+            callback_data=f"chart:{ticker}:{d}",
+        )
+        for d, label in _CHART_PERIODS
+    ]
+    return InlineKeyboardMarkup([
+        period_row,
+        [
+            InlineKeyboardButton("📊 完整分析", callback_data=f"report:{ticker}"),
+            InlineKeyboardButton("⭐ 加入自選", callback_data=f"watch:{ticker}"),
         ],
     ])
+
+
+def _period_label(days: int) -> str:
+    """30 → '30 日'；252 → '1 年'。"""
+    return "1 年" if days >= 252 else f"{days} 日"
 
 
 def _ensure_dict(result, source_name: str) -> dict:
@@ -1089,15 +1171,58 @@ async def _inline_button_handler(update: Update, context: ContextTypes.DEFAULT_T
         added = await add_to_watchlist(user_id, ticker)
         if added:
             await query.answer(f"✅ {ticker} 已加入自選股")
-            new_keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔄 重新分析", callback_data=f"refresh:{ticker}")],
-            ])
             try:
-                await query.edit_message_reply_markup(reply_markup=new_keyboard)
+                await query.edit_message_reply_markup(
+                    reply_markup=_build_report_keyboard(ticker, watched=True)
+                )
             except Exception:
                 pass
         else:
             await query.answer(f"ℹ️ {ticker} 已在自選股清單中", show_alert=True)
+
+    elif data.startswith("chart:"):
+        parts = data.split(":")
+        if len(parts) < 3:
+            await query.answer()
+            return
+        ticker = parts[1]
+        try:
+            days = int(parts[2])
+        except ValueError:
+            days = 60
+        if not rate_limiter.is_allowed(user_id):
+            wait = rate_limiter.retry_after(user_id)
+            await query.answer(f"⏰ 請 {wait} 秒後再試", show_alert=True)
+            return
+        await query.answer(f"📈 生成 {_period_label(days)} K 線…")
+        await bot.send_chat_action(chat_id, ChatAction.UPLOAD_PHOTO)
+        chart_buf = await generate_chart(ticker, days=days)
+        if chart_buf:
+            await bot.send_photo(
+                chat_id=chat_id,
+                photo=chart_buf,
+                caption=f"📈 {ticker} — {_period_label(days)} K 線圖（MA5 / MA20 / MA60）",
+                reply_markup=_chart_keyboard(ticker, days),
+            )
+        else:
+            await bot.send_message(
+                chat_id=chat_id,
+                text=f"❌ 無法生成 <code>{ticker}</code> 的 K 線圖，稍後再試",
+                parse_mode=ParseMode.HTML,
+            )
+
+    elif data.startswith("compare_hint:"):
+        ticker = data.split(":", 1)[1]
+        await query.answer()
+        await bot.send_message(
+            chat_id=chat_id,
+            text=(
+                f"⚖️ 對比 <b>{_esc(ticker)}</b>\n"
+                f"請輸入：<code>/compare {ticker} 其他代碼</code>\n"
+                f"範例：<code>/compare {ticker} MSFT NVDA</code>"
+            ),
+            parse_mode=ParseMode.HTML,
+        )
 
     elif data.startswith("refresh:"):
         ticker = data.split(":", 1)[1]
@@ -1191,6 +1316,25 @@ async def _inline_button_handler(update: Update, context: ContextTypes.DEFAULT_T
             await query.edit_message_reply_markup(reply_markup=_wl_keyboard())
         except Exception:
             pass
+
+    elif data == "back_to_wl":
+        await query.answer("📋 載入清單…")
+        text, keyboard, _ = await _render_watchlist_view(user_id, force_refresh=False)
+        try:
+            await query.edit_message_text(
+                text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=keyboard,
+                disable_web_page_preview=True,
+            )
+        except Exception:
+            await bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=keyboard,
+                disable_web_page_preview=True,
+            )
 
     else:
         await query.answer()

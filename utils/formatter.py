@@ -6,7 +6,9 @@
 """
 
 import html
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+
+_TPE = timezone(timedelta(hours=8))
 
 
 def _esc(value) -> str:
@@ -591,10 +593,10 @@ def format_report(
     # ════════════════════════════════════════
     # FOOTER
     # ════════════════════════════════════════
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    now = datetime.now(_TPE).strftime("%Y-%m-%d %H:%M")
     L.append("")
     L.append(DIV_BOLD)
     L.append("⚠️ 僅供參考研究，不構成投資建議。")
-    L.append(f"📅 {now} | 📊 Stock Analysis Engine v5.0")
+    L.append(f"📅 {now} (UTC+8)")
 
     return "\n".join(L)
