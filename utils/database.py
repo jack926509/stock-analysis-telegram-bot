@@ -256,3 +256,55 @@ async def get_user_query_count(user_id: int, window_seconds: int = 60) -> int:
             finally:
                 conn.close()
         return await asyncio.to_thread(_op)
+
+
+async def get_user_stats(user_id: int) -> dict:
+    """單次撈出 /stats 需要的全部數據（今日/本月查詢、Top 5、自選股數）。"""
+    now = datetime.now(timezone.utc)
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
+
+    async with _db_lock:
+        def _op():
+            conn = _get_connection()
+            try:
+                today_count = conn.execute(
+                    "SELECT COUNT(*) FROM query_history WHERE user_id = ? AND queried_at >= ?",
+                    (user_id, today_start),
+                ).fetchone()[0]
+
+                month_count = conn.execute(
+                    "SELECT COUNT(*) FROM query_history WHERE user_id = ? AND queried_at >= ?",
+                    (user_id, month_start),
+                ).fetchone()[0]
+
+                top_rows = conn.execute(
+                    """
+                    SELECT ticker, COUNT(*) AS cnt FROM query_history
+                    WHERE user_id = ? AND queried_at >= ?
+                    GROUP BY ticker ORDER BY cnt DESC LIMIT 5
+                    """,
+                    (user_id, month_start),
+                ).fetchall()
+
+                wl_count = conn.execute(
+                    "SELECT COUNT(*) FROM watchlist WHERE user_id = ?",
+                    (user_id,),
+                ).fetchone()[0]
+
+                first_row = conn.execute(
+                    "SELECT MIN(queried_at) FROM query_history WHERE user_id = ?",
+                    (user_id,),
+                ).fetchone()
+                first_seen = first_row[0] if first_row else None
+
+                return {
+                    "today_count": today_count,
+                    "month_count": month_count,
+                    "top_tickers": [(t, c) for t, c in top_rows],
+                    "watchlist_count": wl_count,
+                    "first_seen": first_seen,
+                }
+            finally:
+                conn.close()
+        return await asyncio.to_thread(_op)

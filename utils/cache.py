@@ -70,3 +70,4 @@ class LRUCache:
 
 raw_cache = LRUCache(ttl=DEFAULT_RAW_TTL, max_entries=DEFAULT_MAX_ENTRIES)
 report_cache = LRUCache(ttl=DEFAULT_REPORT_TTL, max_entries=50)
+news_cache = LRUCache(ttl=600, max_entries=80)   # /news 專用 10 分鐘

@@ -43,7 +43,7 @@ from fetchers.earnings_surprise_fetcher import fetch_earnings_surprises
 from fetchers.macro_fetcher import fetch_macro_data
 from analyzer.anthropic_analyzer import analyze_stock
 from utils.formatter import format_report
-from utils.cache import raw_cache, report_cache
+from utils.cache import raw_cache, report_cache, news_cache
 from utils.chart import generate_chart
 from utils.signals import compute_signals
 from utils.rate_limiter import rate_limiter
@@ -52,6 +52,7 @@ from utils.database import (
     remove_from_watchlist,
     get_watchlist,
     record_query,
+    get_user_stats,
 )
 from bot.tenk_handler import (
     tenk_command,
@@ -253,9 +254,10 @@ _WELCOME_TEXT = (
     "📊 <b>美股深度分析 Bot</b>\n"
     "12 維度量化信號 + Claude AI 四觀點 + SEC 10-K 全文解析\n"
     "\n"
-    "<b>三種分析深度</b>\n"
+    "<b>四種分析深度</b>\n"
     "<code>/report AAPL</code> — 60 秒完整報告\n"
     "<code>/tenk AAPL</code> — 10-K 年報深度（5–15 分鐘）\n"
+    "<code>/news AAPL</code> — 近 7 日新聞（秒回）\n"
     "<code>/chart AAPL</code> — K 線圖秒回\n"
     "\n"
     "<b>自選股</b>\n"
@@ -270,6 +272,7 @@ _HELP_TEXT = (
     "<b>🔍 分析</b>\n"
     "<code>/report TICKER</code> — 完整深度分析（12 信號 + Claude AI）\n"
     "<code>/tenk TICKER [年] [Q1|Q2|Q3]</code> — 10-K / 10-Q 深度（5–15 分鐘，每日 3 次）\n"
+    "<code>/news TICKER</code> — 近 7 日新聞（秒回，不打 AI）\n"
     "<code>/chart TICKER</code> — 60 日 K 線圖（秒回，省 Claude 費用）\n"
     "<code>/compare T1 T2 …</code> — 並排對比 2–5 檔\n"
     "\n"
@@ -279,6 +282,7 @@ _HELP_TEXT = (
     "<code>/watch TICKER</code> 加入 · <code>/unwatch TICKER</code> 移除\n"
     "\n"
     "<b>🧭 其他</b>\n"
+    "<code>/stats</code> — 個人使用統計（今日/本月/Top 5）\n"
     "<code>/start</code> 歡迎訊息 · <code>/help</code> 本手冊\n"
     "<code>/cancel</code> 中止進行中的分析\n"
     "\n"
@@ -293,7 +297,10 @@ def _start_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton("🔥 試試 AAPL", callback_data="report:AAPL"),
             InlineKeyboardButton("📋 看清單", callback_data="show_watchlist"),
         ],
-        [InlineKeyboardButton("🧭 完整指令", callback_data="show_help")],
+        [
+            InlineKeyboardButton("📊 我的統計", callback_data="show_stats"),
+            InlineKeyboardButton("🧭 完整指令", callback_data="show_help"),
+        ],
     ])
 
 
@@ -894,6 +901,166 @@ async def chart_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     )
 
 
+async def news_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """處理 /news TICKER：只回新聞，不跑 AI 分析（省 token、秒回）。"""
+    if not context.args:
+        await update.message.reply_text(_usage_error("news", "AAPL"), parse_mode=ParseMode.HTML)
+        return
+
+    ticker = context.args[0].upper()
+    if not _validate_ticker(ticker):
+        await update.message.reply_text(_invalid_ticker_error(ticker), parse_mode=ParseMode.HTML)
+        return
+
+    user_id = update.effective_user.id
+    if not rate_limiter.is_allowed(user_id):
+        wait = rate_limiter.retry_after(user_id)
+        await update.message.reply_text(f"⏰ 請求過於頻繁，{wait} 秒後再試")
+        return
+
+    chat_id = update.effective_chat.id
+
+    cache_key = f"news:{ticker}"
+    cached = news_cache.get(cache_key)
+    used_cache = cached is not None
+    if used_cache:
+        data = cached
+    else:
+        await context.bot.send_chat_action(chat_id, ChatAction.TYPING)
+        data = await fetch_tavily_news(ticker)
+        if data and "error" not in data and data.get("news"):
+            news_cache.set(cache_key, data)
+
+    text = _format_news_message(ticker, data, used_cache, news_cache.get_age(cache_key))
+
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("📊 完整分析", callback_data=f"report:{ticker}"),
+            InlineKeyboardButton("⭐ 加入自選", callback_data=f"watch:{ticker}"),
+        ],
+    ])
+    await update.message.reply_text(
+        text,
+        parse_mode=ParseMode.HTML,
+        disable_web_page_preview=True,
+        reply_markup=keyboard,
+    )
+
+
+def _format_news_message(ticker: str, data: dict, used_cache: bool, age: int | None) -> str:
+    """組裝 /news 的 HTML 訊息。倒金字塔：標題 → AI 摘要 → 條列。"""
+    if not data or "error" in data or not data.get("news"):
+        err = (data or {}).get("error", "")
+        hint = "可能是代碼較冷或近 7 日無新聞" if not err else _esc(err)
+        return (
+            f"📰 <b>{_esc(ticker)} 近 7 日無新聞</b>\n"
+            f"{hint}\n"
+            f"試試 <code>/report {_esc(ticker)}</code> 看完整分析"
+        )
+
+    items = data.get("news", [])
+    summary = (data.get("ai_summary") or "").strip()
+    tag = f"⚡ 快取 {age}s" if used_cache and age is not None else "⚡ 即時"
+
+    lines = [f"📰 <b>{_esc(ticker)} 近 7 日新聞 {len(items)} 則</b>", f"<i>{tag}</i>"]
+
+    if summary and summary.lower() not in {"news data unavailable", "n/a"}:
+        if len(summary) > 320:
+            summary = summary[:317] + "…"
+        lines.extend(["", f"💡 {_esc(summary)}"])
+
+    lines.append("")
+    for i, item in enumerate(items, start=1):
+        title = (item.get("title") or "（無標題）").strip()
+        url = item.get("url") or ""
+        if url and url != "N/A":
+            lines.append(f"{i}. <a href=\"{_esc(url)}\">{_esc(title)}</a>")
+        else:
+            lines.append(f"{i}. {_esc(title)}")
+
+    return "\n".join(lines)
+
+
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/stats：個人用量、Top 5、自選股數、10-K 配額。"""
+    await _dispatch_stats(
+        update.effective_chat.id, update.effective_user.id, context.bot,
+    )
+
+
+async def _dispatch_stats(chat_id: int, user_id: int, bot) -> None:
+    """共用 stats 入口：/stats 與 [📊 我的統計] 按鈕都走這裡。"""
+    await bot.send_chat_action(chat_id, ChatAction.TYPING)
+
+    try:
+        stats = await get_user_stats(user_id)
+    except Exception as e:
+        logger.warning(f"[stats] 讀 DB 失敗 user={user_id}: {e}")
+        await bot.send_message(chat_id=chat_id, text="❌ 讀取統計失敗，稍後再試")
+        return
+
+    try:
+        tenk_used, tenk_limit = await get_tenk_quota(user_id)
+    except Exception:
+        tenk_used, tenk_limit = 0, Config.TENK_DAILY_LIMIT
+
+    text = _format_stats_message(stats, tenk_used, tenk_limit)
+
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("📋 看自選股", callback_data="show_watchlist"),
+            InlineKeyboardButton("🔍 批次掃", callback_data="scanall"),
+        ],
+    ])
+    await bot.send_message(
+        chat_id=chat_id,
+        text=text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=keyboard,
+    )
+
+
+def _format_stats_message(stats: dict, tenk_used: int, tenk_limit: int) -> str:
+    """組裝 /stats 的 HTML 訊息（粗體只用 1 次：本月總次數）。"""
+    today = stats.get("today_count", 0)
+    month = stats.get("month_count", 0)
+    wl = stats.get("watchlist_count", 0)
+    top = stats.get("top_tickers", []) or []
+    first_seen = stats.get("first_seen")
+
+    lines = ["📊 你的使用紀錄", ""]
+
+    lines.append("━━━ 今日 ━━━")
+    lines.append(f"完整分析　{today} 次")
+    lines.append(f"10-K 配額　{tenk_used} / {tenk_limit} 次")
+    lines.append("")
+
+    lines.append("━━━ 本月 ━━━")
+    lines.append(f"完整分析　<b>{month} 次</b>")
+    lines.append(f"自選股　　{wl} 檔")
+    lines.append("")
+
+    if top:
+        lines.append("━━━ 最常查 Top 5（本月）━━━")
+        for i, (t, cnt) in enumerate(top, start=1):
+            lines.append(f"{i}. <code>{_esc(t)}</code>　{cnt} 次")
+        lines.append("")
+    else:
+        lines.append("本月還沒有查詢紀錄")
+        lines.append("試試 <code>/report AAPL</code>")
+        lines.append("")
+
+    if first_seen:
+        try:
+            d = datetime.fromisoformat(first_seen.replace("Z", "+00:00"))
+            since_days = max(1, (datetime.now(timezone.utc) - d).days)
+            lines.append(f"<i>使用滿 {since_days} 天</i>")
+        except Exception:
+            pass
+
+    return "\n".join(lines).rstrip()
+
+
 async def compare_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """處理 /compare TICKER1 TICKER2 ...：並排比較 2-5 檔個股。"""
     if not context.args or len(context.args) < 2:
@@ -1430,6 +1597,10 @@ async def _inline_button_handler(update: Update, context: ContextTypes.DEFAULT_T
             disable_web_page_preview=True,
         )
 
+    elif data == "show_stats":
+        await query.answer("📊 載入中…")
+        await _dispatch_stats(chat_id, user_id, bot)
+
     elif data.startswith("tenk_confirm:"):
         ticker = data.split(":", 1)[1]
         if not Config.TENK_ENABLED:
@@ -1660,12 +1831,14 @@ async def setup_bot_commands(bot) -> None:
         BotCommand("help", "指令手冊"),
         BotCommand("report", "完整深度分析報告（需股票代碼）"),
         BotCommand("tenk", "10-K 年報深度分析（5-15 分鐘）"),
+        BotCommand("news", "近 7 日新聞（秒回，省 AI 費用）"),
         BotCommand("chart", "僅 K 線圖（需股票代碼）"),
         BotCommand("compare", "多股對比（2-5 檔代碼）"),
         BotCommand("watchlist", "自選股清單與即時報價"),
         BotCommand("scan", "自選股批次快掃"),
         BotCommand("watch", "加入自選股"),
         BotCommand("unwatch", "移除自選股"),
+        BotCommand("stats", "個人使用統計"),
         BotCommand("cancel", "中止進行中的分析"),
     ]
     try:
@@ -1686,6 +1859,7 @@ def create_bot_application() -> Application:
     app.add_handler(CommandHandler("tenk", tenk_command))
     app.add_handler(CommandHandler("chart", chart_command))
     app.add_handler(CommandHandler("compare", compare_command))
+    app.add_handler(CommandHandler("news", news_command))
 
     # 自選股指令
     app.add_handler(CommandHandler("watchlist", watchlist_command))
@@ -1693,7 +1867,8 @@ def create_bot_application() -> Application:
     app.add_handler(CommandHandler("watch", watch_command))
     app.add_handler(CommandHandler("unwatch", unwatch_command))
 
-    # 會話控制
+    # 個人/輔助
+    app.add_handler(CommandHandler("stats", stats_command))
     app.add_handler(CommandHandler("cancel", cancel_command))
 
     # InlineKeyboard 回調
