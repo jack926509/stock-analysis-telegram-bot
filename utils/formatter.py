@@ -195,14 +195,14 @@ def format_report(
             if bar:
                 L.append(f"  52W {bar}  (${_num(yf.get('52w_low'))}~${_num(yf.get('52w_high'))})")
     else:
-        L.append(f"💰 ⚠️ {_esc(fh.get('error', '報價不可用'))}")
+        L.append(f"💰 ❌ {_esc(fh.get('error', '報價不可用'))}")
 
     # ════════════════════════════════════════
     # 3. FUNDAMENTALS (精簡)
     # ════════════════════════════════════════
     L.append("")
     L.append(f"{DIV}")
-    L.append("📈 <b>基本面</b>")
+    L.append("📈 基本面")
 
     if "error" not in yf:
         L.append(f"  市值 {yf.get('market_cap', 'N/A')}  Beta {_safe(yf.get('beta'))}")
@@ -314,14 +314,14 @@ def format_report(
                 for pp in peer_parts:
                     L.append(f"    {pp}")
     else:
-        L.append(f"  ⚠️ {_esc(yf.get('error', '基本面不可用'))}")
+        L.append(f"  ❌ {_esc(yf.get('error', '基本面不可用'))}")
 
     # ════════════════════════════════════════
     # 4. TECHNICALS (含量能 + 支撐壓力)
     # ════════════════════════════════════════
     L.append("")
     L.append(f"{DIV}")
-    L.append("📊 <b>技術面</b>")
+    L.append("📊 技術面")
 
     if "error" not in tv:
         rec = tv.get("recommendation", "N/A")
@@ -410,7 +410,7 @@ def format_report(
                 if "support_60d" in sr and "resistance_60d" in sr:
                     L.append(f"  中期: 支撐 ${_num(sr['support_60d'])} / 壓力 ${_num(sr['resistance_60d'])}")
     else:
-        L.append(f"  ⚠️ {_esc(tv.get('error', '技術面不可用'))}")
+        L.append(f"  ❌ {_esc(tv.get('error', '技術面不可用'))}")
 
     # ════════════════════════════════════════
     # 5. PERFORMANCE + MACRO (歷史表現 & 環境)
@@ -421,7 +421,7 @@ def format_report(
     if has_hist or has_macro:
         L.append("")
         L.append(f"{DIV}")
-        L.append("📉 <b>表現 &amp; 環境</b>")
+        L.append("📉 表現 &amp; 環境")
 
         if has_hist:
             r7 = _ret(history_data.get("return_7d"))
@@ -477,7 +477,7 @@ def format_report(
     if has_analyst or has_insider or has_eps:
         L.append("")
         L.append(f"{DIV}")
-        L.append("🏦 <b>Smart Money</b>")
+        L.append("🏦 Smart Money")
 
         if has_analyst:
             con = analyst_data.get("consensus", "N/A")
@@ -551,7 +551,7 @@ def format_report(
         if signals:
             L.append("")
             L.append(f"{DIV}")
-            L.append(f"🧮 <b>量化信號引擎 ({len(signals)} 維度)</b>")
+            L.append(f"🧮 量化信號引擎 ({len(signals)} 維度)")
             for s in signals:
                 se = {"bullish": "🟢", "bearish": "🔴"}.get(s.get("signal"), "🟡")
                 L.append(f"  {se} {_esc(s['name'])}: {_esc(s.get('reason', ''))}")
@@ -561,7 +561,7 @@ def format_report(
     # ════════════════════════════════════════
     L.append("")
     L.append(f"{DIV}")
-    L.append("📰 <b>新聞</b>")
+    L.append("📰 新聞")
 
     if "error" not in tavily_data:
         ai_sum = tavily_data.get("ai_summary", "")
@@ -578,14 +578,14 @@ def format_report(
         else:
             L.append("  暫無相關新聞")
     else:
-        L.append(f"  ⚠️ {_esc(tavily_data.get('error', '新聞不可用'))}")
+        L.append(f"  ❌ {_esc(tavily_data.get('error', '新聞不可用'))}")
 
     # ════════════════════════════════════════
     # 9. AI ANALYSIS
     # ════════════════════════════════════════
     L.append("")
     L.append(DIV_BOLD)
-    L.append("🤖 <b>AI 四觀點深度分析</b>")
+    L.append("🤖 AI 四觀點深度分析")
     L.append(DIV_BOLD)
     L.append("")
     L.append(_esc(ai_analysis))

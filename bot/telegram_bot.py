@@ -34,6 +34,7 @@ from fetchers.finnhub_fetcher import fetch_finnhub_quote
 from fetchers.fmp_fetcher import fetch_fmp_fundamentals, fetch_fmp_batch_prices
 from fetchers.tavily_fetcher import fetch_tavily_news
 from fetchers.tradingview_fetcher import fetch_tradingview_analysis
+from fetchers.stooq_fetcher import fetch_stooq_history
 from fetchers.history_fetcher import fetch_history_analysis
 from fetchers.peer_fetcher import fetch_peer_comparison
 from fetchers.analyst_fetcher import fetch_analyst_data
@@ -166,6 +167,48 @@ def _earnings_days(earnings_str) -> int | None:
         return None
 
 
+# ── 自選股 sparkline 快取（30 分鐘）──
+_SPARK_CHARS = "▁▂▃▄▅▆▇█"
+_SPARK_TTL = 1800
+_sparkline_cache: dict[str, tuple[str, float]] = {}
+
+
+def _sparkline(closes: list[float]) -> str:
+    """收盤價序列 → unicode 迷你走勢圖（8 階）。"""
+    if not closes or len(closes) < 2:
+        return ""
+    lo, hi = min(closes), max(closes)
+    if hi == lo:
+        return "▄" * len(closes)
+    out = []
+    rng = hi - lo
+    last = len(_SPARK_CHARS) - 1
+    for c in closes:
+        idx = int((c - lo) / rng * last)
+        out.append(_SPARK_CHARS[max(0, min(last, idx))])
+    return "".join(out)
+
+
+async def _get_sparkline(ticker: str, points: int = 7) -> str:
+    """取最近 N 個交易日 close 組成 sparkline，30 分鐘快取。"""
+    entry = _sparkline_cache.get(ticker)
+    if entry:
+        spark, ts = entry
+        if time.time() - ts < _SPARK_TTL:
+            return spark
+    try:
+        rows = await fetch_stooq_history(ticker, days=points + 3)
+    except Exception:
+        rows = None
+    if not rows:
+        _sparkline_cache[ticker] = ("", time.time())
+        return ""
+    closes = [r["close"] for r in rows[-points:]]
+    spark = _sparkline(closes)
+    _sparkline_cache[ticker] = (spark, time.time())
+    return spark
+
+
 # ── /watchlist 結果快取（避免短時重覆敲指令吃光 FMP 配額）──
 _WL_CACHE_TTL = 120  # 秒
 _WL_CACHE_MAX = 200
@@ -202,49 +245,66 @@ def _wl_cache_age(key: tuple) -> int | None:
 # ══════════════════════════════════════════
 
 
+_WELCOME_TEXT = (
+    "📊 <b>美股深度分析 Bot</b>\n"
+    "12 維度量化信號 + Claude AI 四觀點 + SEC 10-K 全文解析\n"
+    "\n"
+    "<b>三種分析深度</b>\n"
+    "<code>/report AAPL</code> — 60 秒完整報告\n"
+    "<code>/tenk AAPL</code> — 10-K 年報深度（5–15 分鐘）\n"
+    "<code>/chart AAPL</code> — K 線圖秒回\n"
+    "\n"
+    "<b>自選股</b>\n"
+    "<code>/watch AAPL</code> 加入 · <code>/watchlist</code> 看清單 · <code>/scan</code> 批次掃\n"
+    "\n"
+    "點下方按鈕快速開始 ↓"
+)
+
+_HELP_TEXT = (
+    "🧭 <b>指令手冊</b>\n"
+    "\n"
+    "<b>🔍 分析</b>\n"
+    "<code>/report TICKER</code> — 完整深度分析（12 信號 + Claude AI）\n"
+    "<code>/tenk TICKER [年] [Q1|Q2|Q3]</code> — 10-K / 10-Q 深度（5–15 分鐘，每日 3 次）\n"
+    "<code>/chart TICKER</code> — 60 日 K 線圖（秒回，省 Claude 費用）\n"
+    "<code>/compare T1 T2 …</code> — 並排對比 2–5 檔\n"
+    "\n"
+    "<b>📋 自選股</b>\n"
+    "<code>/watchlist</code> — 即時報價儀表板（含警示・52w 位置）\n"
+    "<code>/scan</code> — 批次快掃（含 RSI / 技術評級 / 警示分組）\n"
+    "<code>/watch TICKER</code> 加入 · <code>/unwatch TICKER</code> 移除\n"
+    "\n"
+    "<b>🧭 其他</b>\n"
+    "<code>/start</code> 歡迎訊息 · <code>/help</code> 本手冊\n"
+    "<code>/cancel</code> 中止進行中的分析\n"
+    "\n"
+    "📡 資料：Finnhub · FMP · Stooq · TradingView · Tavily · SEC EDGAR\n"
+    "🛡️ 反幻覺：所有 AI 分析皆需數據佐證，缺失即標 N/A"
+)
+
+
+def _start_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🔥 試試 AAPL", callback_data="report:AAPL"),
+            InlineKeyboardButton("📋 看清單", callback_data="show_watchlist"),
+        ],
+        [InlineKeyboardButton("🧭 完整指令", callback_data="show_help")],
+    ])
+
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """處理 /start 指令"""
-    welcome_msg = (
-        "📊 <b>美股深度分析 Bot</b>\n"
-        "12 維度量化信號 + Claude AI 四觀點 + SEC 10-K 全文解析\n"
-        "\n"
-        "<b>三種分析深度</b>\n"
-        "<code>/report AAPL</code> — 60 秒完整報告\n"
-        "<code>/tenk AAPL</code> — 10-K 年報深度（5–15 分鐘）\n"
-        "<code>/chart AAPL</code> — K 線圖秒回\n"
-        "\n"
-        "<b>自選股</b>\n"
-        "<code>/watch AAPL</code> 加入 · <code>/watchlist</code> 看清單 · <code>/scan</code> 批次掃\n"
-        "\n"
-        "輸入 /help 看完整指令"
+    await update.message.reply_text(
+        _WELCOME_TEXT,
+        parse_mode=ParseMode.HTML,
+        reply_markup=_start_keyboard(),
     )
-    await update.message.reply_text(welcome_msg, parse_mode=ParseMode.HTML)
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """處理 /help 指令 — 詳細指令與用法說明。"""
-    msg = (
-        "🧭 <b>指令手冊</b>\n"
-        "\n"
-        "<b>🔍 分析</b>\n"
-        "<code>/report TICKER</code> — 完整深度分析（12 信號 + Claude AI）\n"
-        "<code>/tenk TICKER [年] [Q1|Q2|Q3]</code> — 10-K / 10-Q 深度（5–15 分鐘，每日 3 次）\n"
-        "<code>/chart TICKER</code> — 60 日 K 線圖（秒回，省 Claude 費用）\n"
-        "<code>/compare T1 T2 …</code> — 並排對比 2–5 檔\n"
-        "\n"
-        "<b>📋 自選股</b>\n"
-        "<code>/watchlist</code> — 即時報價儀表板（含警示・52w 位置）\n"
-        "<code>/scan</code> — 批次快掃（含 RSI / 技術評級 / 警示分組）\n"
-        "<code>/watch TICKER</code> 加入 · <code>/unwatch TICKER</code> 移除\n"
-        "\n"
-        "<b>🧭 其他</b>\n"
-        "<code>/start</code> 歡迎訊息 · <code>/help</code> 本手冊\n"
-        "<code>/cancel</code> 中止進行中的分析\n"
-        "\n"
-        "📡 資料：Finnhub · FMP · Stooq · TradingView · Tavily · SEC EDGAR\n"
-        "🛡️ 反幻覺：所有 AI 分析皆需數據佐證，缺失即標 N/A"
-    )
-    await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
+    await update.message.reply_text(_HELP_TEXT, parse_mode=ParseMode.HTML)
 
 
 async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -411,6 +471,16 @@ async def _render_watchlist_view(user_id: int, force_refresh: bool = False) -> t
         prices = await fetch_fmp_batch_prices(tickers)
         _wl_cache_set(cache_key, prices)
 
+    # 並行抓 sparklines（自帶 30 分鐘快取，第二次以後零成本）
+    spark_results = await asyncio.gather(
+        *[_get_sparkline(t) for t in tickers],
+        return_exceptions=True,
+    )
+    spark_map = {
+        t: (s if isinstance(s, str) else "")
+        for t, s in zip(tickers, spark_results)
+    }
+
     # ── 整理資料 ──
     valid, invalid = [], []
     for t in tickers:
@@ -478,8 +548,10 @@ async def _render_watchlist_view(user_id: int, force_refresh: bool = False) -> t
         if r["earn_days"] is not None:
             tags.append(f"📅{r['earn_days']}天")
         tag_str = f"  {'  '.join(tags)}" if tags else ""
+        spark = spark_map.get(r["ticker"], "")
+        spark_str = f" {spark}" if spark else ""
         lines.append(
-            f"{arrow} <b>{_esc(r['ticker'])}</b>  ${r['price']:.2f}  "
+            f"{arrow} <b>{_esc(r['ticker'])}</b>{spark_str}  ${r['price']:.2f}  "
             f"{sign}{r['chg_pct']:.2f}%{tag_str}"
         )
 
@@ -703,7 +775,7 @@ async def _run_scan(chat_id: int, user_id: int, bot) -> None:
     # ── 警示區 ──
     if alerted_rows:
         lines.append("")
-        lines.append("🚨 <b>警示</b>")
+        lines.append("⚠️ <b>警示</b>")
         alerted_rows.sort(key=lambda x: abs(x[0]["chg_pct"]), reverse=True)
         for r, alerts in alerted_rows:
             lines.append(_row_line(r))
@@ -1172,9 +1244,27 @@ def _ensure_dict(result, source_name: str) -> dict:
     return {"source": source_name, "error": f"{source_name} 回傳格式異常"}
 
 
+_DIV_BOLD_MARK = "━" * 26  # 與 utils/formatter.DIV_BOLD 同步
+
+
 async def _send_report(chat_id: int, bot, report: str, reply_markup=None) -> None:
-    """安全發送報告（HTML parse mode；失敗時退回純文字）。"""
-    chunks = _split_message(report, 4096)
+    """
+    安全發送報告（HTML parse mode；失敗時退回純文字）。
+    結構：第一個 DIV_BOLD 之前獨立為「結論先行卡」（單獨一則便於通知預覽），
+    其餘走依分隔線切分。reply_markup 掛在最後一則。
+    """
+    sep_idx = report.find(_DIV_BOLD_MARK)
+    if 0 < sep_idx <= 1500:
+        lead = report[:sep_idx].rstrip()
+        rest = report[sep_idx + len(_DIV_BOLD_MARK):].lstrip("\n")
+    else:
+        lead = ""
+        rest = report
+
+    chunks: list[str] = []
+    if lead:
+        chunks.append(lead)
+    chunks.extend(_split_message(rest, 4096))
 
     for i, chunk in enumerate(chunks):
         is_last = (i == len(chunks) - 1)
@@ -1189,7 +1279,6 @@ async def _send_report(chat_id: int, bot, report: str, reply_markup=None) -> Non
             )
         except Exception as html_err:
             logger.warning(f"HTML 發送失敗，降級純文字: {html_err}")
-            # 移除 HTML 標籤後重發
             plain = re.sub(r"<[^>]+>", "", chunk)
             try:
                 await bot.send_message(
@@ -1283,6 +1372,21 @@ async def _inline_button_handler(update: Update, context: ContextTypes.DEFAULT_T
                 text=f"❌ 無法生成 <code>{ticker}</code> 的 K 線圖，稍後再試",
                 parse_mode=ParseMode.HTML,
             )
+
+    elif data == "show_help":
+        await query.answer()
+        await bot.send_message(chat_id=chat_id, text=_HELP_TEXT, parse_mode=ParseMode.HTML)
+
+    elif data == "show_watchlist":
+        await query.answer("📋 載入清單…")
+        text, keyboard, _ = await _render_watchlist_view(user_id, force_refresh=False)
+        await bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=keyboard,
+            disable_web_page_preview=True,
+        )
 
     elif data.startswith("compare_hint:"):
         ticker = data.split(":", 1)[1]
