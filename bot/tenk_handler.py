@@ -103,7 +103,6 @@ async def tenk_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     year = _default_year()
     quarter = None
-    filing_type = "10-K"
 
     if len(args) >= 2:
         try:
@@ -121,41 +120,72 @@ async def tenk_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             await update.message.reply_text("❌ 季度格式應為 Q1 / Q2 / Q3")
             return
         quarter = q
-        filing_type = "10-Q"
 
-    user_id = update.effective_user.id
-    chat_id = update.effective_chat.id
+    await dispatch_tenk_analysis(
+        chat_id=update.effective_chat.id,
+        user_id=update.effective_user.id,
+        ticker=ticker,
+        bot=context.bot,
+        year=year,
+        quarter=quarter,
+    )
 
-    # 同一使用者一次只能跑一個 tenk
+
+async def dispatch_tenk_analysis(
+    *,
+    chat_id: int,
+    user_id: int,
+    ticker: str,
+    bot,
+    year: int | None = None,
+    quarter: str | None = None,
+) -> None:
+    """共用入口：/tenk 指令與 [📋 10K] 按鈕都走這裡。"""
+    if not Config.TENK_ENABLED:
+        await bot.send_message(chat_id=chat_id, text="ℹ️ 10-K 深度分析功能目前未啟用")
+        return
+
+    if not _validate_ticker(ticker):
+        await bot.send_message(chat_id=chat_id, text="❌ 無效的股票代碼")
+        return
+
+    if year is None:
+        year = _default_year()
+    filing_type = "10-Q" if quarter else "10-K"
+
     if user_id in _inflight_users:
-        await update.message.reply_text(
-            "⏳ 你已經有一個 10-K 分析在進行中，請等它完成再開新的"
+        await bot.send_message(
+            chat_id=chat_id,
+            text="⏳ 你已經有一個 10-K 分析在進行中，請等它完成再開新的",
         )
         return
 
-    # 每日次數限制
     used = await tenk_get_daily_count(user_id)
     if used >= Config.TENK_DAILY_LIMIT:
-        await update.message.reply_text(
-            f"⚠️ 今日 10-K 深度分析已用完（{used}/{Config.TENK_DAILY_LIMIT}）\n"
-            f"明日 UTC 00:00 重置"
+        await bot.send_message(
+            chat_id=chat_id,
+            text=(
+                f"⚠️ 今日 10-K 深度分析已用完（{used}/{Config.TENK_DAILY_LIMIT}）\n"
+                f"明日 UTC 00:00 重置"
+            ),
         )
         return
 
-    # 半年快取
     cached = await tenk_get_cached_report(
         ticker, year, filing_type, quarter, Config.TENK_REPORT_TTL_DAYS,
     )
     if cached:
-        await _send_cached(update, context, ticker, year, filing_type, quarter, cached)
+        await _send_cached_via_bot(bot, chat_id, ticker, year, filing_type, quarter, cached)
         return
 
-    # 啟動背景 task
     label = filing_type + (f" {quarter}" if quarter else "")
-    loading = await update.message.reply_text(
-        f"🔍 <b>{_h(ticker)} {_h(year)} {_h(label)}</b> 深度分析啟動\n"
-        f"預估 8-15 分鐘，完成後會主動推送\n"
-        f"你可以繼續用其他指令",
+    loading = await bot.send_message(
+        chat_id=chat_id,
+        text=(
+            f"🔍 <b>{_h(ticker)} {_h(year)} {_h(label)}</b> 深度分析啟動\n"
+            f"預估 8-15 分鐘，完成後會主動推送\n"
+            f"你可以繼續用其他指令"
+        ),
         parse_mode=ParseMode.HTML,
     )
 
@@ -169,12 +199,19 @@ async def tenk_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             filing_type=filing_type,
             quarter=quarter,
             loading_message=loading,
-            bot=context.bot,
+            bot=bot,
         )
     )
 
 
-async def _send_cached(update, context, ticker, year, filing_type, quarter, cached) -> None:
+async def get_tenk_quota(user_id: int) -> tuple[int, int]:
+    """回傳 (used, limit) — 給 [📋 10K] callback 顯示配額。"""
+    used = await tenk_get_daily_count(user_id)
+    return used, Config.TENK_DAILY_LIMIT
+
+
+async def _send_cached_via_bot(bot, chat_id, ticker, year, filing_type, quarter, cached) -> None:
+    """callback / dispatch 走這條（純 bot+chat_id 版）。"""
     age = "—"
     try:
         created = datetime.fromisoformat(cached["created_at"].replace("Z", "+00:00"))
@@ -183,23 +220,27 @@ async def _send_cached(update, context, ticker, year, filing_type, quarter, cach
     except Exception:
         pass
 
-    await update.message.reply_text(
-        f"⚡ 使用 {age} 的快取結果（半年內不重跑）",
+    await bot.send_message(
+        chat_id=chat_id,
+        text=f"⚡ 快取 ({age}，半年內不重跑)",
         disable_notification=True,
     )
-    await update.message.reply_text(
-        cached["summary"],
+    await bot.send_message(
+        chat_id=chat_id,
+        text=cached["summary"],
         parse_mode=ParseMode.HTML,
         disable_web_page_preview=True,
     )
     md_path = Path(cached["report_md_path"])
     if md_path.exists():
-        await context.bot.send_document(
-            chat_id=update.effective_chat.id,
+        await bot.send_document(
+            chat_id=chat_id,
             document=md_path.open("rb"),
             filename=md_path.name,
             caption=f"📑 {ticker} {year} {filing_type}{(' ' + quarter) if quarter else ''} 完整報告",
         )
+
+
 
 
 # ────────────────────────────────────────────

@@ -53,7 +53,11 @@ from utils.database import (
     get_watchlist,
     record_query,
 )
-from bot.tenk_handler import tenk_command
+from bot.tenk_handler import (
+    tenk_command,
+    dispatch_tenk_analysis,
+    get_tenk_quota,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -642,6 +646,9 @@ async def unwatch_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     )
 
 
+_SCAN_PAGE_SIZE = 10
+
+
 async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """處理 /scan 指令：批次快掃自選股（報價 + 技術面 + 關鍵指標）。"""
     chat_id = update.effective_chat.id
@@ -649,10 +656,10 @@ async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await _run_scan(chat_id, user_id, context.bot)
 
 
-async def _run_scan(chat_id: int, user_id: int, bot) -> None:
-    tickers = await get_watchlist(user_id)
+async def _run_scan(chat_id: int, user_id: int, bot, page: int = 0) -> None:
+    all_tickers = await get_watchlist(user_id)
 
-    if not tickers:
+    if not all_tickers:
         await bot.send_message(
             chat_id=chat_id,
             text="📋 自選股清單是空的\n用 <code>/watch AAPL</code> 加入第一檔",
@@ -660,14 +667,17 @@ async def _run_scan(chat_id: int, user_id: int, bot) -> None:
         )
         return
 
-    truncated = len(tickers) > 10
-    if truncated:
-        tickers = tickers[:10]
+    total = len(all_tickers)
+    pages = max(1, (total + _SCAN_PAGE_SIZE - 1) // _SCAN_PAGE_SIZE)
+    page = max(0, min(page, pages - 1))
+    start = page * _SCAN_PAGE_SIZE
+    end = start + _SCAN_PAGE_SIZE
+    tickers = all_tickers[start:end]
+    has_prev = page > 0
+    has_next = end < total
 
-    loading = await bot.send_message(
-        chat_id=chat_id,
-        text=f"🔍 掃描 {len(tickers)} 檔自選股…",
-    )
+    loading_text = f"🔍 掃描第 {page + 1}/{pages} 頁（{len(tickers)} 檔）…" if pages > 1 else f"🔍 掃描 {len(tickers)} 檔自選股…"
+    loading = await bot.send_message(chat_id=chat_id, text=loading_text)
 
     prices = await fetch_fmp_batch_prices(tickers)
 
@@ -823,17 +833,25 @@ async def _run_scan(chat_id: int, user_id: int, bot) -> None:
         for r in invalid:
             lines.append(f"  ⚪ <b>{_esc(r['ticker'])}</b>  ➜ /report {_esc(r['ticker'])} 嘗試完整分析")
 
-    footer = f"\n共 {len(tickers)} 檔  |  ➜ /report 查看完整分析"
-    if truncated:
-        footer = "\n⚠️ 超過 10 檔，僅顯示前 10  |  ➜ /report 查看完整分析"
+    if pages > 1:
+        footer = f"\n第 {page + 1}/{pages} 頁  |  共 {total} 檔  |  ➜ /report 看完整分析"
+    else:
+        footer = f"\n共 {total} 檔  |  ➜ /report 看完整分析"
     lines.append(footer)
 
-    scan_keyboard = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("🔄 強刷", callback_data="scanall"),
-            InlineKeyboardButton("📋 清單", callback_data="back_to_wl"),
-        ],
+    nav_row = []
+    if has_prev:
+        nav_row.append(InlineKeyboardButton("⬅️ 前 10", callback_data=f"scan_page:{page - 1}"))
+    if has_next:
+        nav_row.append(InlineKeyboardButton("➡️ 後 10", callback_data=f"scan_page:{page + 1}"))
+    keyboard_rows = []
+    if nav_row:
+        keyboard_rows.append(nav_row)
+    keyboard_rows.append([
+        InlineKeyboardButton("🔄 強刷", callback_data=f"scan_page:{page}"),
+        InlineKeyboardButton("📋 清單", callback_data="back_to_wl"),
     ])
+    scan_keyboard = InlineKeyboardMarkup(keyboard_rows)
     await loading.edit_text(
         "\n".join(lines),
         parse_mode=ParseMode.HTML,
@@ -1208,6 +1226,9 @@ def _build_report_keyboard(ticker: str, watched: bool = False) -> InlineKeyboard
             InlineKeyboardButton("📚 SEC", url=_SEC_EDGAR_TPL.format(t=ticker)),
             InlineKeyboardButton("⚖️ 對比", callback_data=f"compare_hint:{ticker}"),
         ],
+        [
+            InlineKeyboardButton("📋 10-K 深度", callback_data=f"tenk_confirm:{ticker}"),
+        ],
     ]
     if watched:
         rows.append([InlineKeyboardButton("🔄 重新分析", callback_data=f"refresh:{ticker}")])
@@ -1409,6 +1430,56 @@ async def _inline_button_handler(update: Update, context: ContextTypes.DEFAULT_T
             disable_web_page_preview=True,
         )
 
+    elif data.startswith("tenk_confirm:"):
+        ticker = data.split(":", 1)[1]
+        if not Config.TENK_ENABLED:
+            await query.answer("ℹ️ 功能未啟用", show_alert=True)
+            return
+        await query.answer()
+        try:
+            used, limit = await get_tenk_quota(user_id)
+        except Exception:
+            used, limit = 0, 3
+        remaining = max(0, limit - used)
+        confirm_kb = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("✅ 啟動", callback_data=f"tenk_run:{ticker}"),
+                InlineKeyboardButton("取消", callback_data="tenk_no"),
+            ],
+        ])
+        await bot.send_message(
+            chat_id=chat_id,
+            text=(
+                f"⚠️ <b>{_esc(ticker)} 10-K 深度分析</b>\n"
+                f"預估 8–15 分鐘 · 完成後主動推送\n"
+                f"今日剩餘 {remaining}/{limit} 次 · 半年內已分析過會走快取\n\n"
+                f"確定啟動？"
+            ),
+            parse_mode=ParseMode.HTML,
+            reply_markup=confirm_kb,
+        )
+
+    elif data.startswith("tenk_run:"):
+        ticker = data.split(":", 1)[1]
+        await query.answer("📋 啟動 10-K…")
+        try:
+            await query.edit_message_text(
+                f"📋 <b>{_esc(ticker)}</b> 10-K 已送出",
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception:
+            pass
+        await dispatch_tenk_analysis(
+            chat_id=chat_id, user_id=user_id, ticker=ticker, bot=bot,
+        )
+
+    elif data == "tenk_no":
+        await query.answer("已取消")
+        try:
+            await query.edit_message_text("已取消 10-K 分析")
+        except Exception:
+            pass
+
     elif data.startswith("compare_hint:"):
         ticker = data.split(":", 1)[1]
         await query.answer()
@@ -1449,6 +1520,14 @@ async def _inline_button_handler(update: Update, context: ContextTypes.DEFAULT_T
     elif data == "scanall":
         await query.answer("🔍 開始批次快掃...")
         await _run_scan(chat_id, user_id, bot)
+
+    elif data.startswith("scan_page:"):
+        try:
+            page = int(data.split(":", 1)[1])
+        except ValueError:
+            page = 0
+        await query.answer(f"📊 第 {page + 1} 頁…")
+        await _run_scan(chat_id, user_id, bot, page=page)
 
     elif data == "wl_refresh":
         await query.answer("🔄 強刷中...")
