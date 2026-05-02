@@ -24,6 +24,8 @@ from telegram.ext import (
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
+    MessageHandler,
+    filters,
 )
 from telegram.constants import ChatAction, ParseMode
 
@@ -56,6 +58,9 @@ logger = logging.getLogger(__name__)
 
 # ── 並發控制 ──
 _analysis_semaphore = asyncio.Semaphore(3)
+
+# ── 進行中的分析任務（chat_id → asyncio.Task）— /cancel 用 ──
+_running_tasks: dict[int, asyncio.Task] = {}
 
 # ── 超時設定（秒）──
 FETCH_TIMEOUT = 45
@@ -234,11 +239,47 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "\n"
         "<b>🧭 其他</b>\n"
         "<code>/start</code> 歡迎訊息 · <code>/help</code> 本手冊\n"
+        "<code>/cancel</code> 中止進行中的分析\n"
         "\n"
         "📡 資料：Finnhub · FMP · Stooq · TradingView · Tavily · SEC EDGAR\n"
         "🛡️ 反幻覺：所有 AI 分析皆需數據佐證，缺失即標 N/A"
     )
     await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
+
+
+async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """中止當前 chat 進行中的分析任務。"""
+    chat_id = update.effective_chat.id
+    task = _running_tasks.get(chat_id)
+    if not task or task.done():
+        await update.message.reply_text("ℹ️ 目前沒有進行中的分析")
+        return
+    task.cancel()
+    # 不在這裡發 confirm — _dispatch_analysis 的 finally 會發「已取消」訊息
+
+
+async def fallback_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    處理非指令文字訊息：
+    - 若像 ticker（1–5 字元、字母+數字），引導三個動作
+    - 否則回覆 /help 提示
+    """
+    text = (update.message.text or "").strip().upper()
+
+    if _validate_ticker(text):
+        await update.message.reply_text(
+            f"💡 看起來像股票代碼 <code>{text}</code>，要做什麼？\n"
+            f"<code>/report {text}</code> 完整分析（60 秒）\n"
+            f"<code>/chart {text}</code> K 線圖（秒回）\n"
+            f"<code>/watch {text}</code> 加入自選",
+            parse_mode=ParseMode.HTML,
+        )
+    else:
+        await update.message.reply_text(
+            "🤖 我聽不懂這句話，輸入 /help 看完整指令\n"
+            "或試試 <code>/report AAPL</code>",
+            parse_mode=ParseMode.HTML,
+        )
 
 
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -309,8 +350,31 @@ async def _dispatch_analysis(chat_id: int, user_id: int, ticker: str, bot) -> No
         )
         return
 
-    async with _analysis_semaphore:
-        await _execute_analysis(chat_id, ticker, bot)
+    # 同一 chat 已有分析在跑時拒絕，提示 /cancel
+    existing = _running_tasks.get(chat_id)
+    if existing and not existing.done():
+        await bot.send_message(
+            chat_id=chat_id,
+            text="⏳ 你已有一筆分析在跑，輸入 /cancel 中止後再重試",
+        )
+        return
+
+    async def _run() -> None:
+        async with _analysis_semaphore:
+            await _execute_analysis(chat_id, ticker, bot)
+
+    task = asyncio.create_task(_run())
+    _running_tasks[chat_id] = task
+    try:
+        await task
+    except asyncio.CancelledError:
+        await bot.send_message(
+            chat_id=chat_id,
+            text=f"⏹️ 已取消 <b>{ticker}</b> 分析",
+            parse_mode=ParseMode.HTML,
+        )
+    finally:
+        _running_tasks.pop(chat_id, None)
 
 
 def _wl_keyboard() -> InlineKeyboardMarkup:
@@ -470,25 +534,34 @@ async def watch_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def unwatch_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """處理 /unwatch [TICKER] 指令：移除自選股。"""
+    """處理 /unwatch [TICKER] 指令：發確認鍵盤，避免誤觸。"""
     if not context.args:
         await update.message.reply_text(_usage_error("unwatch", "AAPL"), parse_mode=ParseMode.HTML)
         return
 
     ticker = context.args[0].upper()
     user_id = update.effective_user.id
-    removed = await remove_from_watchlist(user_id, ticker)
 
-    if removed:
-        await update.message.reply_text(
-            f"✅ 已從自選股移除 <code>{ticker}</code>",
-            parse_mode=ParseMode.HTML,
-        )
-    else:
+    # 先檢查是否在清單中，不在就直接告知
+    tickers = await get_watchlist(user_id)
+    if ticker not in tickers:
         await update.message.reply_text(
             f"ℹ️ <code>{ticker}</code> 不在清單中",
             parse_mode=ParseMode.HTML,
         )
+        return
+
+    confirm_kb = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(f"✅ 確認移除", callback_data=f"unwatch_yes:{ticker}"),
+            InlineKeyboardButton("取消", callback_data=f"unwatch_no:{ticker}"),
+        ],
+    ])
+    await update.message.reply_text(
+        f"⚠️ 確定要從自選股移除 <code>{ticker}</code>？",
+        parse_mode=ParseMode.HTML,
+        reply_markup=confirm_kb,
+    )
 
 
 async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1286,29 +1359,50 @@ async def _inline_button_handler(update: Update, context: ContextTypes.DEFAULT_T
             pass
 
     elif data.startswith("unwatchcb:"):
+        # 從管理介面點「❌ 移除」— 彈出獨立確認訊息（不動原管理介面）
+        ticker = data.split(":", 1)[1]
+        await query.answer()
+        confirm_kb = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("✅ 確認移除", callback_data=f"unwatch_yes:{ticker}"),
+                InlineKeyboardButton("取消", callback_data=f"unwatch_no:{ticker}"),
+            ],
+        ])
+        await bot.send_message(
+            chat_id=chat_id,
+            text=f"⚠️ 確定要從自選股移除 <code>{_esc(ticker)}</code>？",
+            parse_mode=ParseMode.HTML,
+            reply_markup=confirm_kb,
+        )
+
+    elif data.startswith("unwatch_yes:"):
         ticker = data.split(":", 1)[1]
         removed = await remove_from_watchlist(user_id, ticker)
         if removed:
             await query.answer(f"✅ 已移除 {ticker}")
-            tickers = await get_watchlist(user_id)
-            if tickers:
-                buttons = []
-                for t in tickers:
-                    buttons.append([
-                        InlineKeyboardButton(f"📈 {t}", callback_data=f"report:{t}"),
-                        InlineKeyboardButton("❌ 移除", callback_data=f"unwatchcb:{t}"),
-                    ])
-                buttons.append([InlineKeyboardButton("🔙 返回", callback_data="back_wl")])
-                try:
-                    await query.edit_message_reply_markup(
-                        reply_markup=InlineKeyboardMarkup(buttons)
-                    )
-                except Exception:
-                    pass
-            else:
-                await query.edit_message_text("📋 自選股清單已清空。使用 /watch AAPL 加入股票")
+            try:
+                await query.edit_message_text(
+                    f"✅ 已從自選股移除 <code>{_esc(ticker)}</code>",
+                    parse_mode=ParseMode.HTML,
+                )
+            except Exception:
+                pass
         else:
             await query.answer(f"ℹ️ {ticker} 不在清單中", show_alert=True)
+            try:
+                await query.edit_message_text(
+                    f"ℹ️ <code>{_esc(ticker)}</code> 已不在清單中",
+                    parse_mode=ParseMode.HTML,
+                )
+            except Exception:
+                pass
+
+    elif data.startswith("unwatch_no:"):
+        await query.answer("已取消")
+        try:
+            await query.edit_message_text("已取消移除")
+        except Exception:
+            pass
 
     elif data == "back_wl":
         await query.answer()
@@ -1366,6 +1460,7 @@ async def setup_bot_commands(bot) -> None:
         BotCommand("scan", "自選股批次快掃"),
         BotCommand("watch", "加入自選股"),
         BotCommand("unwatch", "移除自選股"),
+        BotCommand("cancel", "中止進行中的分析"),
     ]
     try:
         await bot.set_my_commands(commands)
@@ -1392,8 +1487,14 @@ def create_bot_application() -> Application:
     app.add_handler(CommandHandler("watch", watch_command))
     app.add_handler(CommandHandler("unwatch", unwatch_command))
 
+    # 會話控制
+    app.add_handler(CommandHandler("cancel", cancel_command))
+
     # InlineKeyboard 回調
     app.add_handler(CallbackQueryHandler(_inline_button_handler))
+
+    # Fallback：未知文字訊息（必須最後註冊）
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, fallback_text_handler))
 
     app.add_error_handler(error_handler)
 
