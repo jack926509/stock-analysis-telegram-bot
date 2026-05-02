@@ -304,7 +304,11 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """處理 /help 指令 — 詳細指令與用法說明。"""
-    await update.message.reply_text(_HELP_TEXT, parse_mode=ParseMode.HTML)
+    await update.message.reply_text(
+        _HELP_TEXT,
+        parse_mode=ParseMode.HTML,
+        reply_markup=_start_keyboard(),
+    )
 
 
 async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -391,7 +395,7 @@ async def _dispatch_analysis(chat_id: int, user_id: int, ticker: str, bot) -> No
         age = report_cache.get_age(ticker) or 0
         await bot.send_message(
             chat_id=chat_id,
-            text=f"⚡ 使用 {age} 秒前的快取結果",
+            text=f"⚡ 快取 {age}s",
             disable_notification=True,
         )
         keyboard = _build_report_keyboard(ticker)
@@ -513,7 +517,9 @@ async def _render_watchlist_view(user_id: int, force_refresh: bool = False) -> t
     summary += f"  平均 {'+' if avg_pct >= 0 else ''}{avg_pct:.2f}%"
     if used_cache:
         age = _wl_cache_age(cache_key) or 0
-        summary += f"  ⚡{age}s 快取"
+        summary += f"  ⚡ 快取 {age}s"
+    else:
+        summary += "  ⚡ 即時"
     lines = [summary]
 
     if valid:
@@ -666,6 +672,7 @@ async def _run_scan(chat_id: int, user_id: int, bot) -> None:
     prices = await fetch_fmp_batch_prices(tickers)
 
     ta_tasks = [fetch_tradingview_analysis(t) for t in tickers]
+    ta_timeout = False
     try:
         ta_results = await asyncio.wait_for(
             asyncio.gather(*ta_tasks, return_exceptions=True),
@@ -673,6 +680,8 @@ async def _run_scan(chat_id: int, user_id: int, bot) -> None:
         )
     except asyncio.TimeoutError:
         ta_results = [{}] * len(tickers)
+        ta_timeout = True
+        logger.warning(f"[scan] TradingView 全面超時 ({len(tickers)} 檔)")
 
     rec_map = {
         "STRONG_BUY": "強買", "BUY": "買入",
@@ -751,6 +760,8 @@ async def _run_scan(chat_id: int, user_id: int, bot) -> None:
         header += f" / ⚪{len(flats)} 平"
     header += f"  平均 {'+' if avg_pct >= 0 else ''}{avg_pct:.2f}%"
     lines = [header]
+    if ta_timeout:
+        lines.append("⚠️ TradingView 超時，技術面顯示為 N/A")
 
     def _row_line(r) -> str:
         arrow = "🟢" if r["chg_pct"] >= 0 else "🔴"
@@ -1268,7 +1279,10 @@ async def _send_report(chat_id: int, bot, report: str, reply_markup=None) -> Non
 
     for i, chunk in enumerate(chunks):
         is_last = (i == len(chunks) - 1)
+        is_first = (i == 0)
         markup = reply_markup if is_last else None
+        # 第一則響通知（結論先行卡），後續訊息靜默避免重複打擾
+        silent = not is_first
         try:
             await bot.send_message(
                 chat_id=chat_id,
@@ -1276,6 +1290,7 @@ async def _send_report(chat_id: int, bot, report: str, reply_markup=None) -> Non
                 parse_mode=ParseMode.HTML,
                 disable_web_page_preview=True,
                 reply_markup=markup,
+                disable_notification=silent,
             )
         except Exception as html_err:
             logger.warning(f"HTML 發送失敗，降級純文字: {html_err}")
@@ -1286,6 +1301,7 @@ async def _send_report(chat_id: int, bot, report: str, reply_markup=None) -> Non
                     text=plain,
                     disable_web_page_preview=True,
                     reply_markup=markup,
+                    disable_notification=silent,
                 )
             except Exception as txt_err:
                 logger.error(f"純文字發送也失敗: {txt_err}")
@@ -1375,7 +1391,12 @@ async def _inline_button_handler(update: Update, context: ContextTypes.DEFAULT_T
 
     elif data == "show_help":
         await query.answer()
-        await bot.send_message(chat_id=chat_id, text=_HELP_TEXT, parse_mode=ParseMode.HTML)
+        await bot.send_message(
+            chat_id=chat_id,
+            text=_HELP_TEXT,
+            parse_mode=ParseMode.HTML,
+            reply_markup=_start_keyboard(),
+        )
 
     elif data == "show_watchlist":
         await query.answer("📋 載入清單…")
@@ -1545,7 +1566,9 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
     if update and isinstance(update, Update) and update.message:
         try:
             await update.message.reply_text(
-                "❌ 系統發生錯誤，請稍後重試\n若持續發生，輸入 /help 查看其他指令"
+                "❌ 系統忙線，10 秒後重試\n"
+                "若卡住，輸入 /cancel 中止當前任務後再試\n"
+                "需要查指令？輸入 /help"
             )
         except Exception:
             pass

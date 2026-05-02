@@ -6,9 +6,12 @@ Anthropic Claude AI 分析引擎。
 """
 
 import json
+import logging
 
 from config import Config
 from utils.ai_client import cached_system, get_ai_client
+
+logger = logging.getLogger(__name__)
 
 
 # 對「分析」零貢獻、純背景描述／識別碼欄位 — 進入 AI 前先剔除以省 input tokens。
@@ -230,7 +233,7 @@ async def analyze_stock(
 
         response = await client.messages.create(
             model=Config.ANTHROPIC_MODEL,
-            max_tokens=2800,
+            max_tokens=2400,
             system=cached_system(SYSTEM_PROMPT),
             messages=[
                 {"role": "user", "content": user_prompt},
@@ -242,4 +245,8 @@ async def analyze_stock(
         return response.content[0].text
 
     except Exception as e:
-        return f"❌ AI 分析引擎錯誤: {str(e)}\n\n請檢查 Anthropic API Key 是否有效。"
+        logger.warning(f"AI 分析失敗 [{ticker}]: {e}", exc_info=True)
+        return (
+            "❌ AI 分析引擎暫時不可用，30 秒後重試。\n"
+            "（以下為原始數據供參考）"
+        )

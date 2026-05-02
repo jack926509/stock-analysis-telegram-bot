@@ -12,7 +12,7 @@ from collections import OrderedDict
 logger = logging.getLogger(__name__)
 
 DEFAULT_RAW_TTL = 1800      # 30 分鐘
-DEFAULT_REPORT_TTL = 300    # 5 分鐘
+DEFAULT_REPORT_TTL = 600    # 10 分鐘（重複查詢直接命中，省 AI 費用）
 DEFAULT_MAX_ENTRIES = 100
 
 
