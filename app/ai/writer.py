@@ -80,7 +80,7 @@ async def write_newsletter(plan: dict, market_data: dict) -> str:
 請撰寫完整日報："""
 
         response = await client.messages.create(
-            model=Config.ANTHROPIC_MODEL,
+            model=Config.ANTHROPIC_PLANNER_MODEL,
             max_tokens=2200,
             system=cached_system(WRITER_SYSTEM),
             messages=[

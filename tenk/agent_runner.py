@@ -31,6 +31,26 @@ _SKILL_MAX_TOKENS = {
 }
 _DEFAULT_MAX_TOKENS = 4096
 
+# 純結構化萃取或分類，不需深度推理 → Haiku 4.5（成本約 1/3）
+_HAIKU_SKILLS = frozenset({
+    "footnotes_assets",
+    "footnotes_compensation",
+    "footnotes_pension",
+    "footnotes_receivables",
+    "footnotes_revenue",
+    "footnotes_risk",
+    "footnotes_segment",
+    "footnotes_tax",
+    "competitor_mapping",
+    "governance_analysis",
+    "terms_glossary",
+    "section_splitter",
+    "completeness_check",
+    "rerate_quality",
+    "rerate_narrative",
+    "rerate_structure",
+})
+
 _dry_run = False
 _MOCK_OUTPUTS: dict | None = None
 
@@ -117,7 +137,12 @@ async def run_agent(
         logger.info(f"[tenk dry-run] {label}")
         return json.loads(json.dumps(mock))  # deep copy
 
-    model = model or Config.ANTHROPIC_MODEL
+    if model is None:
+        model = (
+            Config.ANTHROPIC_PLANNER_MODEL
+            if skill_name in _HAIKU_SKILLS
+            else Config.ANTHROPIC_MODEL
+        )
     max_tokens = max_tokens or _SKILL_MAX_TOKENS.get(skill_name, _DEFAULT_MAX_TOKENS)
 
     agent_md = (PACKAGE_DIR / "agents" / f"{agent_name}.md").read_text(encoding="utf-8")
@@ -142,12 +167,12 @@ async def run_agent(
     usage = response.usage
 
     skill_ver = _get_skill_version(skill_name)
-    _save_context(label, system_prompt, user_content, raw, usage, skill_ver)
+    _save_context(label, system_prompt, user_content, raw, usage, skill_ver, model)
 
     return _parse_json_loose(raw, skill_name)
 
 
-def _save_context(label, system, user_content, response_text, usage, skill_version="unknown") -> None:
+def _save_context(label, system, user_content, response_text, usage, skill_version="unknown", model="") -> None:
     """Persist request/response + append usage line. Failures are non-fatal."""
     try:
         log_dir = Path(Config.TENK_OUTPUT_DIR) / "contexts"
@@ -163,6 +188,7 @@ def _save_context(label, system, user_content, response_text, usage, skill_versi
         req_path.write_text(
             f"# Request: {label}\n"
             f"Time: {datetime.now().isoformat()}\n"
+            f"Model: {model}\n"
             f"Tokens: in={in_tokens}, out={out_tokens}\n\n"
             f"## System\n\n{system}\n\n"
             f"## User\n\n{user_content}\n",
@@ -173,16 +199,22 @@ def _save_context(label, system, user_content, response_text, usage, skill_versi
         resp_path.write_text(
             f"# Response: {label}\n"
             f"Time: {datetime.now().isoformat()}\n"
+            f"Model: {model}\n"
             f"Tokens: in={in_tokens}, out={out_tokens}\n\n"
             f"## Raw Output\n\n{response_text}\n",
             encoding="utf-8",
         )
 
-        cost = in_tokens * 3e-6 + out_tokens * 15e-6
+        # Haiku 4.5: $1/M in, $5/M out；Sonnet 4.6: $3/M in, $15/M out
+        is_haiku = "haiku" in (model or "").lower()
+        in_rate = 1e-6 if is_haiku else 3e-6
+        out_rate = 5e-6 if is_haiku else 15e-6
+        cost = in_tokens * in_rate + out_tokens * out_rate
         entry = {
             "ts": datetime.now().isoformat(),
             "label": label,
             "version": skill_version,
+            "model": model,
             "in": in_tokens,
             "out": out_tokens,
             "cost": cost,
