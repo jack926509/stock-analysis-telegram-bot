@@ -9,17 +9,26 @@ All AI modules (analyzer / planner / writer) should import from here so:
 """
 
 import anthropic
+import httpx
 
 from config import Config
 
 _client: anthropic.AsyncAnthropic | None = None
+
+# 連線/讀取上限避免在 Anthropic 端網路異常時無限掛起；
+# 個別呼叫端仍可用 messages.create(timeout=...) 覆寫此預設。
+_HTTPX_TIMEOUT = httpx.Timeout(connect=10.0, read=120.0, write=30.0, pool=10.0)
 
 
 def get_ai_client() -> anthropic.AsyncAnthropic:
     """Return the shared AsyncAnthropic client (lazy-init on first call)."""
     global _client
     if _client is None:
-        _client = anthropic.AsyncAnthropic(api_key=Config.ANTHROPIC_API_KEY)
+        _client = anthropic.AsyncAnthropic(
+            api_key=Config.ANTHROPIC_API_KEY,
+            timeout=_HTTPX_TIMEOUT,
+            max_retries=2,
+        )
     return _client
 
 

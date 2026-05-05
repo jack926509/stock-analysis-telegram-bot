@@ -17,6 +17,10 @@ logger = logging.getLogger(__name__)
 # 後端優化：共用 client 實例，避免每次請求重建
 _finnhub_client: finnhub.Client | None = None
 
+# finnhub-python 內部 requests session 沒有暴露 timeout 參數，
+# 由呼叫端用 asyncio.wait_for 包住強制上限，避免阻塞 event loop。
+_FINNHUB_CALL_TIMEOUT = 15.0
+
 
 def _get_client() -> finnhub.Client:
     """取得共用的 Finnhub client。"""
@@ -38,9 +42,12 @@ async def fetch_finnhub_quote(ticker: str) -> dict:
     """
     try:
         client = _get_client()
-        quote = await retry_async_call(
-            asyncio.to_thread, client.quote, ticker.upper(),
-            source_name="Finnhub",
+        quote = await asyncio.wait_for(
+            retry_async_call(
+                asyncio.to_thread, client.quote, ticker.upper(),
+                source_name="Finnhub",
+            ),
+            timeout=_FINNHUB_CALL_TIMEOUT,
         )
 
         if not quote or quote.get("c", 0) == 0:
@@ -75,7 +82,14 @@ async def fetch_finnhub_quote(ticker: str) -> dict:
             "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
         }
 
+    except asyncio.TimeoutError:
+        logger.warning(f"[Finnhub] {ticker} quote 逾時（{_FINNHUB_CALL_TIMEOUT}s）")
+        return {
+            "source": "Finnhub",
+            "error": f"Finnhub API 逾時（>{int(_FINNHUB_CALL_TIMEOUT)}s）",
+        }
     except Exception as e:
+        logger.warning(f"[Finnhub] {ticker} quote 失敗: {e}")
         return {
             "source": "Finnhub",
             "error": f"Finnhub API 錯誤: {str(e)}",
@@ -91,8 +105,14 @@ async def fetch_finnhub_metrics(ticker: str) -> dict:
         return {}
     try:
         client = _get_client()
-        data = await asyncio.to_thread(client.company_basic_financials, ticker.upper(), "all")
+        data = await asyncio.wait_for(
+            asyncio.to_thread(client.company_basic_financials, ticker.upper(), "all"),
+            timeout=_FINNHUB_CALL_TIMEOUT,
+        )
         return data.get("metric", {}) if isinstance(data, dict) else {}
+    except asyncio.TimeoutError:
+        logger.warning(f"[Finnhub] basic_financials {ticker} 逾時（{_FINNHUB_CALL_TIMEOUT}s）")
+        return {}
     except Exception as e:
         logger.warning(f"[Finnhub] basic_financials {ticker} 失敗: {e}")
         return {}

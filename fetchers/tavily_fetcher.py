@@ -5,14 +5,20 @@ Tavily 新聞搜尋模組（優化版）
 """
 
 import asyncio
+import logging
 
 from tavily import TavilyClient
 
 from config import Config
 from utils.retry import retry_async_call
 
+logger = logging.getLogger(__name__)
+
 # 後端優化：共用 client 實例
 _tavily_client: TavilyClient | None = None
+
+# Tavily SDK 不暴露 timeout，呼叫端強制 wait_for。
+_TAVILY_CALL_TIMEOUT = 20.0
 
 
 def _get_client() -> TavilyClient:
@@ -49,17 +55,20 @@ async def fetch_tavily_news(ticker: str, company_name: str = "") -> dict:
                 f"upgrade downgrade catalyst news"
             )
 
-        response = await retry_async_call(
-            asyncio.to_thread,
-            lambda: client.search(
-                query=query,
-                search_depth="advanced",
-                include_answer=True,
-                max_results=5,
-                topic="news",
-                days=7,
+        response = await asyncio.wait_for(
+            retry_async_call(
+                asyncio.to_thread,
+                lambda: client.search(
+                    query=query,
+                    search_depth="advanced",
+                    include_answer=True,
+                    max_results=5,
+                    topic="news",
+                    days=7,
+                ),
+                source_name="Tavily",
             ),
-            source_name="Tavily",
+            timeout=_TAVILY_CALL_TIMEOUT,
         )
 
         # 解析新聞結果
@@ -89,7 +98,16 @@ async def fetch_tavily_news(ticker: str, company_name: str = "") -> dict:
             "news": news_items,
         }
 
+    except asyncio.TimeoutError:
+        logger.warning(f"[Tavily] {ticker} 搜尋逾時（{_TAVILY_CALL_TIMEOUT}s）")
+        return {
+            "source": "Tavily",
+            "error": f"Tavily 搜尋逾時（>{int(_TAVILY_CALL_TIMEOUT)}s）",
+            "ai_summary": "News data unavailable",
+            "news": [],
+        }
     except Exception as e:
+        logger.warning(f"[Tavily] {ticker} 搜尋失敗: {e}")
         return {
             "source": "Tavily",
             "error": f"Tavily 新聞搜尋錯誤: {str(e)}",

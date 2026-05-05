@@ -153,55 +153,64 @@ async def dispatch_tenk_analysis(
         year = _default_year()
     filing_type = "10-Q" if quarter else "10-K"
 
+    # Atomic check-and-add：在進入任何 await 之前同步搶占 inflight 標記，
+    # 否則兩個並發請求可能都通過 `if user_id in _inflight_users` 檢查。
     if user_id in _inflight_users:
         await bot.send_message(
             chat_id=chat_id,
             text="⏳ 你已經有一個 10-K 分析在進行中，請等它完成再開新的",
         )
         return
+    _inflight_users.add(user_id)
 
-    used = await tenk_get_daily_count(user_id)
-    if used >= Config.TENK_DAILY_LIMIT:
-        await bot.send_message(
+    background_owns_flag = False
+    try:
+        used = await tenk_get_daily_count(user_id)
+        if used >= Config.TENK_DAILY_LIMIT:
+            await bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    f"⚠️ 今日 10-K 深度分析已用完（{used}/{Config.TENK_DAILY_LIMIT}）\n"
+                    f"明日 UTC 00:00 重置"
+                ),
+            )
+            return
+
+        cached = await tenk_get_cached_report(
+            ticker, year, filing_type, quarter, Config.TENK_REPORT_TTL_DAYS,
+        )
+        if cached:
+            await _send_cached_via_bot(bot, chat_id, ticker, year, filing_type, quarter, cached)
+            return
+
+        label = filing_type + (f" {quarter}" if quarter else "")
+        loading = await bot.send_message(
             chat_id=chat_id,
             text=(
-                f"⚠️ 今日 10-K 深度分析已用完（{used}/{Config.TENK_DAILY_LIMIT}）\n"
-                f"明日 UTC 00:00 重置"
+                f"🔍 <b>{_h(ticker)} {_h(year)} {_h(label)}</b> 深度分析啟動\n"
+                f"預估 8-15 分鐘，完成後會主動推送\n"
+                f"你可以繼續用其他指令"
             ),
+            parse_mode=ParseMode.HTML,
         )
-        return
 
-    cached = await tenk_get_cached_report(
-        ticker, year, filing_type, quarter, Config.TENK_REPORT_TTL_DAYS,
-    )
-    if cached:
-        await _send_cached_via_bot(bot, chat_id, ticker, year, filing_type, quarter, cached)
-        return
-
-    label = filing_type + (f" {quarter}" if quarter else "")
-    loading = await bot.send_message(
-        chat_id=chat_id,
-        text=(
-            f"🔍 <b>{_h(ticker)} {_h(year)} {_h(label)}</b> 深度分析啟動\n"
-            f"預估 8-15 分鐘，完成後會主動推送\n"
-            f"你可以繼續用其他指令"
-        ),
-        parse_mode=ParseMode.HTML,
-    )
-
-    _inflight_users.add(user_id)
-    asyncio.create_task(
-        _run_tenk_background(
-            chat_id=chat_id,
-            user_id=user_id,
-            ticker=ticker,
-            year=year,
-            filing_type=filing_type,
-            quarter=quarter,
-            loading_message=loading,
-            bot=bot,
+        asyncio.create_task(
+            _run_tenk_background(
+                chat_id=chat_id,
+                user_id=user_id,
+                ticker=ticker,
+                year=year,
+                filing_type=filing_type,
+                quarter=quarter,
+                loading_message=loading,
+                bot=bot,
+            )
         )
-    )
+        # 背景 task 接管所有權，由其 finally 負責 discard
+        background_owns_flag = True
+    finally:
+        if not background_owns_flag:
+            _inflight_users.discard(user_id)
 
 
 async def get_tenk_quota(user_id: int) -> tuple[int, int]:
@@ -261,8 +270,8 @@ async def _run_tenk_background(
                 f"目前有其他 10-K 分析進行中，排隊等待…",
                 parse_mode=ParseMode.HTML,
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"[tenk] {ticker} queue-status edit failed: {e}")
 
     async with _tenk_semaphore:
         try:
@@ -284,8 +293,10 @@ async def _run_tenk_background(
                     text += f"\n<i>{_h(detail)}</i>"
                 try:
                     await loading_message.edit_text(text, parse_mode=ParseMode.HTML)
-                except Exception:
-                    pass
+                except Exception as e:
+                    # 多半是 Telegram「message is not modified」或 rate limit；
+                    # 進度更新不應中斷主 pipeline，但需可觀測。
+                    logger.debug(f"[tenk] {ticker} progress edit failed ({stage}): {e}")
 
             # 真正執行（lazy import 避免 bot 啟動就載入重依賴）
             from tenk.pipeline import run_tenk_analysis
@@ -315,8 +326,8 @@ async def _run_tenk_background(
             # 收尾：刪 loading、推摘要、推 md 檔
             try:
                 await loading_message.delete()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"[tenk] {ticker} loading message delete failed: {e}")
 
             await bot.send_message(
                 chat_id=chat_id,
@@ -366,5 +377,5 @@ async def _run_tenk_background(
 async def _safe_edit(message, text: str) -> None:
     try:
         await message.edit_text(text, parse_mode=ParseMode.HTML)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"[tenk] safe edit failed: {e}")
