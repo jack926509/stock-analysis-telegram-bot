@@ -3,9 +3,9 @@ tenk.agent_runner
 單一 agent 呼叫的 async 包裝。
 
 設計：
-- 透過 utils.ai_client.get_ai_client() 共用 AsyncOpenAI 實例（指向 OpenRouter）
-- system prompt 走 OpenRouter cache_control passthrough（routed 到 Anthropic
-  模型時自動啟用 prompt caching）
+- 透過 utils.ai_client.get_ai_client() 共用 AsyncOpenAI 實例（OpenAI 官方 API）
+- 長 system prompt（agent + skill markdown 通常 ≥1024 tokens）由 OpenAI 自動
+  prompt caching；命中時 cached input tokens 享 50% 折扣
 - 模型與 max_tokens 來自 bot Config 與 _SKILL_MAX_TOKENS
 - usage / context log 寫到 Config.TENK_OUTPUT_DIR
 """
@@ -32,8 +32,8 @@ _SKILL_MAX_TOKENS = {
 }
 _DEFAULT_MAX_TOKENS = 4096
 
-# 純結構化萃取或分類，不需深度推理 → Haiku 4.5（成本約 1/3）
-_HAIKU_SKILLS = frozenset({
+# 純結構化萃取或分類，不需深度推理 → 用 mini 系列省錢（成本約 1/15）
+_MINI_SKILLS = frozenset({
     "footnotes_assets",
     "footnotes_compensation",
     "footnotes_pension",
@@ -140,9 +140,9 @@ async def run_agent(
 
     if model is None:
         model = (
-            Config.OPENROUTER_PLANNER_MODEL
-            if skill_name in _HAIKU_SKILLS
-            else Config.OPENROUTER_MODEL
+            Config.OPENAI_PLANNER_MODEL
+            if skill_name in _MINI_SKILLS
+            else Config.OPENAI_MODEL
         )
     max_tokens = max_tokens or _SKILL_MAX_TOKENS.get(skill_name, _DEFAULT_MAX_TOKENS)
 
@@ -167,20 +167,44 @@ async def run_agent(
         timeout=120,
     )
     raw = extract_text(response)
-    in_tokens, out_tokens = extract_usage(response)
+    in_tokens, out_tokens, cached_tokens = extract_usage(response)
 
     skill_ver = _get_skill_version(skill_name)
     _save_context(
         label, system_prompt, user_content, raw,
-        in_tokens, out_tokens, skill_ver, model,
+        in_tokens, out_tokens, cached_tokens, skill_ver, model,
     )
 
     return _parse_json_loose(raw, skill_name)
 
 
+# OpenAI 公開定價（$/token）— 命中 prompt cache 的 input tokens 享 50% 折扣。
+# 來源：https://openai.com/api/pricing/
+# 若使用其他模型（o1, gpt-4-turbo…），caller 可改 _OPENAI_PRICING 或交給預設值。
+_OPENAI_PRICING: dict[str, tuple[float, float]] = {
+    # model_substring : (input $/token, output $/token)
+    "gpt-4o-mini":  (0.15e-6,  0.60e-6),
+    "gpt-4o":       (2.50e-6, 10.00e-6),
+    "o1-mini":      (1.10e-6,  4.40e-6),
+    "o1":          (15.00e-6, 60.00e-6),
+    "gpt-4-turbo": (10.00e-6, 30.00e-6),
+}
+_DEFAULT_RATES = (2.50e-6, 10.00e-6)  # 未匹配時保守估（gpt-4o 價）
+
+
+def _resolve_rates(model: str) -> tuple[float, float]:
+    """以子字串包含關係匹配最具體的模型費率（mini 優先於 4o）。"""
+    name = (model or "").lower()
+    # 排序：較長的 key 先匹配（避免 gpt-4o 搶在 gpt-4o-mini 之前）
+    for key in sorted(_OPENAI_PRICING.keys(), key=len, reverse=True):
+        if key in name:
+            return _OPENAI_PRICING[key]
+    return _DEFAULT_RATES
+
+
 def _save_context(
     label, system, user_content, response_text,
-    in_tokens, out_tokens,
+    in_tokens, out_tokens, cached_tokens=0,
     skill_version="unknown", model="",
 ) -> None:
     """Persist request/response + append usage line. Failures are non-fatal."""
@@ -191,12 +215,16 @@ def _save_context(
         ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         safe_label = re.sub(r"[^\w\-.]", "_", label)
 
+        token_line = f"Tokens: in={in_tokens}, out={out_tokens}"
+        if cached_tokens:
+            token_line += f", cached={cached_tokens}"
+
         req_path = log_dir / f"{ts}_{safe_label}_request.md"
         req_path.write_text(
             f"# Request: {label}\n"
             f"Time: {datetime.now().isoformat()}\n"
             f"Model: {model}\n"
-            f"Tokens: in={in_tokens}, out={out_tokens}\n\n"
+            f"{token_line}\n\n"
             f"## System\n\n{system}\n\n"
             f"## User\n\n{user_content}\n",
             encoding="utf-8",
@@ -207,16 +235,15 @@ def _save_context(
             f"# Response: {label}\n"
             f"Time: {datetime.now().isoformat()}\n"
             f"Model: {model}\n"
-            f"Tokens: in={in_tokens}, out={out_tokens}\n\n"
+            f"{token_line}\n\n"
             f"## Raw Output\n\n{response_text}\n",
             encoding="utf-8",
         )
 
-        # Haiku 4.5: $1/M in, $5/M out；Sonnet 4.6: $3/M in, $15/M out
-        is_haiku = "haiku" in (model or "").lower()
-        in_rate = 1e-6 if is_haiku else 3e-6
-        out_rate = 5e-6 if is_haiku else 15e-6
-        cost = in_tokens * in_rate + out_tokens * out_rate
+        in_rate, out_rate = _resolve_rates(model)
+        # cached input tokens 享 50% 折扣
+        billable_in = max(in_tokens - cached_tokens, 0)
+        cost = billable_in * in_rate + cached_tokens * (in_rate * 0.5) + out_tokens * out_rate
         entry = {
             "ts": datetime.now().isoformat(),
             "label": label,
@@ -224,6 +251,7 @@ def _save_context(
             "model": model,
             "in": in_tokens,
             "out": out_tokens,
+            "cached_in": cached_tokens,
             "cost": cost,
             "request_file": req_path.name,
             "response_file": resp_path.name,

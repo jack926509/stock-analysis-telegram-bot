@@ -80,7 +80,7 @@ async def write_newsletter(plan: dict, market_data: dict) -> str:
 請撰寫完整日報："""
 
         response = await client.chat.completions.create(
-            model=Config.OPENROUTER_PLANNER_MODEL,
+            model=Config.OPENAI_PLANNER_MODEL,
             max_tokens=2200,
             messages=[
                 system_message(WRITER_SYSTEM),
@@ -95,6 +95,6 @@ async def write_newsletter(plan: dict, market_data: dict) -> str:
         return newsletter
 
     except openai.APIError as e:
-        raise AIGenerationError(f"OpenRouter API error: {e}") from e
+        raise AIGenerationError(f"OpenAI API error: {e}") from e
     except Exception as e:
         raise AIGenerationError(f"Writing error: {e}") from e

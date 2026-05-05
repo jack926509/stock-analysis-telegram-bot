@@ -1,6 +1,6 @@
 """
 Newsletter AI 規劃模組
-透過 OpenRouter（OpenAI-compatible）呼叫 LLM 分析市場數據，規劃日報內容結構。
+透過 OpenAI API 分析市場數據，規劃日報內容結構。
 """
 
 import json
@@ -77,7 +77,7 @@ async def plan_newsletter(market_data: dict) -> dict:
 請以 JSON 格式回傳規劃結果："""
 
         response = await client.chat.completions.create(
-            model=Config.OPENROUTER_PLANNER_MODEL,
+            model=Config.OPENAI_PLANNER_MODEL,
             max_tokens=1200,
             messages=[
                 system_message(PLANNER_SYSTEM),
@@ -85,11 +85,13 @@ async def plan_newsletter(market_data: dict) -> dict:
             ],
             temperature=0.2,
             timeout=60,
+            response_format={"type": "json_object"},
         )
 
         raw_text = extract_text(response)
 
-        # 從回應中解析 JSON
+        # 從回應中解析 JSON（response_format=json_object 已強制 JSON 輸出，
+        # 但保留 _extract_json 的容錯路徑）
         plan = _extract_json(raw_text)
         if plan is None:
             raise AIGenerationError(f"無法從 AI 回應中解析 JSON: {raw_text[:200]}")
@@ -100,7 +102,7 @@ async def plan_newsletter(market_data: dict) -> dict:
     except AIGenerationError:
         raise
     except openai.APIError as e:
-        raise AIGenerationError(f"OpenRouter API error: {e}") from e
+        raise AIGenerationError(f"OpenAI API error: {e}") from e
     except Exception as e:
         raise AIGenerationError(f"Planning error: {e}") from e
 
