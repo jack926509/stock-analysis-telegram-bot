@@ -2,10 +2,11 @@
 tenk.agent_runner
 單一 agent 呼叫的 async 包裝。
 
-差異於上游版本：
-- 改用 utils.ai_client.get_ai_client() 共用 AsyncAnthropic 實例
-- system prompt 走 prompt caching（cached_system）
-- 移除自家 config.json，模型與 max_tokens 來自 bot Config 與 _SKILL_MAX_TOKENS
+設計：
+- 透過 utils.ai_client.get_ai_client() 共用 AsyncOpenAI 實例（指向 OpenRouter）
+- system prompt 走 OpenRouter cache_control passthrough（routed 到 Anthropic
+  模型時自動啟用 prompt caching）
+- 模型與 max_tokens 來自 bot Config 與 _SKILL_MAX_TOKENS
 - usage / context log 寫到 Config.TENK_OUTPUT_DIR
 """
 
@@ -16,7 +17,7 @@ from datetime import datetime
 from pathlib import Path
 
 from config import Config
-from utils.ai_client import cached_system, get_ai_client
+from utils.ai_client import extract_text, extract_usage, get_ai_client, system_message
 
 from . import PACKAGE_DIR
 
@@ -139,9 +140,9 @@ async def run_agent(
 
     if model is None:
         model = (
-            Config.ANTHROPIC_PLANNER_MODEL
+            Config.OPENROUTER_PLANNER_MODEL
             if skill_name in _HAIKU_SKILLS
-            else Config.ANTHROPIC_MODEL
+            else Config.OPENROUTER_MODEL
         )
     max_tokens = max_tokens or _SKILL_MAX_TOKENS.get(skill_name, _DEFAULT_MAX_TOKENS)
 
@@ -156,23 +157,32 @@ async def run_agent(
     user_content = "\n".join(parts)
 
     client = get_ai_client()
-    response = await client.messages.create(
+    response = await client.chat.completions.create(
         model=model,
         max_tokens=max_tokens,
-        system=cached_system(system_prompt),
-        messages=[{"role": "user", "content": user_content}],
+        messages=[
+            system_message(system_prompt),
+            {"role": "user", "content": user_content},
+        ],
         timeout=120,
     )
-    raw = response.content[0].text.strip()
-    usage = response.usage
+    raw = extract_text(response)
+    in_tokens, out_tokens = extract_usage(response)
 
     skill_ver = _get_skill_version(skill_name)
-    _save_context(label, system_prompt, user_content, raw, usage, skill_ver, model)
+    _save_context(
+        label, system_prompt, user_content, raw,
+        in_tokens, out_tokens, skill_ver, model,
+    )
 
     return _parse_json_loose(raw, skill_name)
 
 
-def _save_context(label, system, user_content, response_text, usage, skill_version="unknown", model="") -> None:
+def _save_context(
+    label, system, user_content, response_text,
+    in_tokens, out_tokens,
+    skill_version="unknown", model="",
+) -> None:
     """Persist request/response + append usage line. Failures are non-fatal."""
     try:
         log_dir = Path(Config.TENK_OUTPUT_DIR) / "contexts"
@@ -180,9 +190,6 @@ def _save_context(label, system, user_content, response_text, usage, skill_versi
 
         ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         safe_label = re.sub(r"[^\w\-.]", "_", label)
-
-        in_tokens = getattr(usage, "input_tokens", 0) or 0
-        out_tokens = getattr(usage, "output_tokens", 0) or 0
 
         req_path = log_dir / f"{ts}_{safe_label}_request.md"
         req_path.write_text(

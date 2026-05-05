@@ -6,7 +6,10 @@
 """
 
 import html
+import logging
 from datetime import datetime, timedelta, timezone
+
+logger = logging.getLogger(__name__)
 
 _TPE = timezone(timedelta(hours=8))
 
@@ -154,8 +157,10 @@ def format_report(
         if rec != "N/A": parts.append(_rec_cn(rec))
         rsi = tv.get("rsi_14", "N/A")
         if rsi != "N/A":
-            try: parts.append(f"RSI {float(rsi):.0f}{_rsi_tag(rsi)}")
-            except: pass
+            try:
+                parts.append(f"RSI {float(rsi):.0f}{_rsi_tag(rsi)}")
+            except (ValueError, TypeError) as e:
+                logger.debug(f"[formatter] RSI parse failed for value={rsi!r}: {e}")
     if parts:
         L.append(f"⚡ {' | '.join(parts)}")
 

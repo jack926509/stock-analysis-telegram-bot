@@ -1,19 +1,17 @@
 """
 Newsletter AI 規劃模組
-使用 Anthropic Claude 分析市場數據，規劃日報內容結構。
-
-關鍵修正：使用 client.messages.create()（非 .parse()，.parse() 是 OpenAI 專屬方法）
+透過 OpenRouter（OpenAI-compatible）呼叫 LLM 分析市場數據，規劃日報內容結構。
 """
 
 import json
 import logging
 
-import anthropic
+import openai
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 from config import Config
 from app.ai.exceptions import AIGenerationError
-from utils.ai_client import cached_system, get_ai_client
+from utils.ai_client import extract_text, get_ai_client, system_message
 
 logger = logging.getLogger("newsletter")
 
@@ -78,18 +76,18 @@ async def plan_newsletter(market_data: dict) -> dict:
 
 請以 JSON 格式回傳規劃結果："""
 
-        response = await client.messages.create(
-            model=Config.ANTHROPIC_PLANNER_MODEL,
+        response = await client.chat.completions.create(
+            model=Config.OPENROUTER_PLANNER_MODEL,
             max_tokens=1200,
-            system=cached_system(PLANNER_SYSTEM),
             messages=[
+                system_message(PLANNER_SYSTEM),
                 {"role": "user", "content": user_prompt},
             ],
             temperature=0.2,
             timeout=60,
         )
 
-        raw_text = response.content[0].text
+        raw_text = extract_text(response)
 
         # 從回應中解析 JSON
         plan = _extract_json(raw_text)
@@ -101,8 +99,8 @@ async def plan_newsletter(market_data: dict) -> dict:
 
     except AIGenerationError:
         raise
-    except anthropic.APIError as e:
-        raise AIGenerationError(f"Anthropic API error: {e}") from e
+    except openai.APIError as e:
+        raise AIGenerationError(f"OpenRouter API error: {e}") from e
     except Exception as e:
         raise AIGenerationError(f"Planning error: {e}") from e
 

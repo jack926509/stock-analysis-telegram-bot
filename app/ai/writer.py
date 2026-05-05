@@ -6,12 +6,12 @@ Newsletter AI 撰寫模組
 import json
 import logging
 
-import anthropic
+import openai
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 from config import Config
 from app.ai.exceptions import AIGenerationError
-from utils.ai_client import cached_system, get_ai_client
+from utils.ai_client import extract_text, get_ai_client, system_message
 
 logger = logging.getLogger("newsletter")
 
@@ -79,22 +79,22 @@ async def write_newsletter(plan: dict, market_data: dict) -> str:
 
 請撰寫完整日報："""
 
-        response = await client.messages.create(
-            model=Config.ANTHROPIC_PLANNER_MODEL,
+        response = await client.chat.completions.create(
+            model=Config.OPENROUTER_PLANNER_MODEL,
             max_tokens=2200,
-            system=cached_system(WRITER_SYSTEM),
             messages=[
+                system_message(WRITER_SYSTEM),
                 {"role": "user", "content": user_prompt},
             ],
             temperature=0.3,
             timeout=90,
         )
 
-        newsletter = response.content[0].text
+        newsletter = extract_text(response)
         logger.info(f"日報撰寫完成，共 {len(newsletter)} 字")
         return newsletter
 
-    except anthropic.APIError as e:
-        raise AIGenerationError(f"Anthropic API error: {e}") from e
+    except openai.APIError as e:
+        raise AIGenerationError(f"OpenRouter API error: {e}") from e
     except Exception as e:
         raise AIGenerationError(f"Writing error: {e}") from e

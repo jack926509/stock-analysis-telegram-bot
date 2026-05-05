@@ -41,7 +41,7 @@ from fetchers.analyst_fetcher import fetch_analyst_data
 from fetchers.insider_fetcher import fetch_insider_transactions
 from fetchers.earnings_surprise_fetcher import fetch_earnings_surprises
 from fetchers.macro_fetcher import fetch_macro_data
-from analyzer.anthropic_analyzer import analyze_stock
+from analyzer.llm_analyzer import analyze_stock
 from utils.formatter import format_report
 from utils.cache import raw_cache, report_cache, news_cache
 from utils.chart import generate_chart
@@ -172,10 +172,19 @@ def _earnings_days(earnings_str) -> int | None:
         return None
 
 
-# ── 自選股 sparkline 快取（30 分鐘）──
+# ── 自選股 sparkline 快取（30 分鐘，LRU 上限避免長時間運行記憶體膨脹）──
 _SPARK_CHARS = "▁▂▃▄▅▆▇█"
 _SPARK_TTL = 1800
+_SPARK_CACHE_MAX = 500
 _sparkline_cache: dict[str, tuple[str, float]] = {}
+
+
+def _sparkline_cache_set(ticker: str, spark: str) -> None:
+    """寫入 sparkline 快取，超過上限時驅逐最舊條目（O(n)，n 受上限約束）。"""
+    _sparkline_cache[ticker] = (spark, time.time())
+    if len(_sparkline_cache) > _SPARK_CACHE_MAX:
+        oldest = min(_sparkline_cache.items(), key=lambda kv: kv[1][1])[0]
+        _sparkline_cache.pop(oldest, None)
 
 
 def _sparkline(closes: list[float]) -> str:
@@ -203,14 +212,15 @@ async def _get_sparkline(ticker: str, points: int = 7) -> str:
             return spark
     try:
         rows = await fetch_stooq_history(ticker, days=points + 3)
-    except Exception:
+    except Exception as e:
+        logger.debug(f"[sparkline] {ticker} history fetch failed: {e}")
         rows = None
     if not rows:
-        _sparkline_cache[ticker] = ("", time.time())
+        _sparkline_cache_set(ticker, "")
         return ""
     closes = [r["close"] for r in rows[-points:]]
     spark = _sparkline(closes)
-    _sparkline_cache[ticker] = (spark, time.time())
+    _sparkline_cache_set(ticker, spark)
     return spark
 
 
