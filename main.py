@@ -48,6 +48,11 @@ async def _run_bot():
     # 建立 Bot Application
     app = create_bot_application()
 
+    # 啟動時非阻塞清理舊的 tenk 檔案（避免長期累積吃光磁碟）
+    if Config.TENK_ENABLED:
+        from utils.cleanup import cleanup_tenk_files
+        asyncio.create_task(cleanup_tenk_files())
+
     logger.info("✅ Bot 已啟動！等待指令中...")
     logger.info("📌 可用指令: /start, /help, /report, /tenk, /chart, /compare, /watchlist, /scan, /watch, /unwatch")
 
@@ -156,6 +161,11 @@ def _run_polling_with_health():
         # 啟動時觸發日報生成（非阻塞）
         if Config.NEWSLETTER_ENABLED:
             asyncio.create_task(_run_newsletter_on_startup())
+
+        # 啟動時非阻塞清理舊的 tenk 檔案
+        if Config.TENK_ENABLED:
+            from utils.cleanup import cleanup_tenk_files
+            asyncio.create_task(cleanup_tenk_files())
 
     async def _post_shutdown(application):
         """Bot 關閉後的 hook，用來關閉健康檢查。"""

@@ -1,9 +1,13 @@
 import json
+import logging
+import time
 from pathlib import Path
 
 import requests
 
 from config import Config
+
+logger = logging.getLogger(__name__)
 
 # tenk 快取根目錄（10-K HTM 與 XBRL JSON 都存這）
 BASE_DIR = Path(Config.TENK_CACHE_DIR)
@@ -14,6 +18,61 @@ KNOWN_CIKS = {
     "HWM": "0000004281",
 }
 
+# SEC EDGAR 限流：10 req/s。我們透過重試容忍偶發 429/5xx，並尊重 Retry-After。
+_RETRY_STATUS = {429, 500, 502, 503, 504}
+_MAX_RETRIES = 3
+_BASE_BACKOFF = 1.5
+_MAX_BACKOFF = 30.0
+
+
+def _sec_get(url: str, *, timeout: int) -> requests.Response:
+    """
+    requests.get 包一層 SEC EDGAR 專用的 transient-error 重試。
+
+    - 連線/讀取錯誤：指數退避重試
+    - HTTP 429：尊重 Retry-After header（capped at _MAX_BACKOFF）
+    - HTTP 5xx：指數退避
+    - 仍失敗會 raise 最後一次的例外（or .raise_for_status()）
+    """
+    last_exc: Exception | None = None
+    for attempt in range(_MAX_RETRIES + 1):
+        try:
+            r = requests.get(url, headers=HEADERS, timeout=timeout)
+        except (requests.ConnectionError, requests.Timeout) as e:
+            last_exc = e
+            if attempt >= _MAX_RETRIES:
+                raise
+            delay = min(_BASE_BACKOFF * (2 ** attempt), _MAX_BACKOFF)
+            logger.warning(
+                f"[SEC] {url} 連線失敗（attempt {attempt + 1}/{_MAX_RETRIES + 1}）: {e}，"
+                f"{delay:.1f}s 後重試"
+            )
+            time.sleep(delay)
+            continue
+
+        if r.status_code in _RETRY_STATUS and attempt < _MAX_RETRIES:
+            retry_after = r.headers.get("Retry-After")
+            if retry_after:
+                try:
+                    delay = min(float(retry_after), _MAX_BACKOFF)
+                except ValueError:
+                    delay = min(_BASE_BACKOFF * (2 ** attempt), _MAX_BACKOFF)
+            else:
+                delay = min(_BASE_BACKOFF * (2 ** attempt), _MAX_BACKOFF)
+            logger.warning(
+                f"[SEC] {url} HTTP {r.status_code}（attempt {attempt + 1}/{_MAX_RETRIES + 1}），"
+                f"{delay:.1f}s 後重試"
+            )
+            time.sleep(delay)
+            continue
+
+        return r
+
+    # Unreachable in practice — loop above either returns or raises.
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError(f"[SEC] {url} 重試耗盡")
+
 
 def get_cik(ticker: str) -> str:
     ticker = ticker.upper()
@@ -22,9 +81,8 @@ def get_cik(ticker: str) -> str:
     cache = BASE_DIR / f"xbrl/cik_{ticker}.json"
     if cache.exists():
         return json.loads(cache.read_text())["cik"]
-    r = requests.get(
+    r = _sec_get(
         "https://www.sec.gov/files/company_tickers.json",
-        headers=HEADERS,
         timeout=15,
     )
     r.raise_for_status()
@@ -52,9 +110,8 @@ def download_filing(ticker: str, year: int, filing_type: str = "10-K",
     cache_dir.mkdir(parents=True, exist_ok=True)
 
     cik = get_cik(ticker)
-    r = requests.get(
+    r = _sec_get(
         f"https://data.sec.gov/submissions/CIK{cik}.json",
-        headers=HEADERS,
         timeout=45,
     )
     r.raise_for_status()
@@ -89,7 +146,7 @@ def download_filing(ticker: str, year: int, filing_type: str = "10-K",
             label += f"_{quarter}"
         cache_path = cache_dir / f"{ticker}_{year}_{label}.{ext}"
         if not cache_path.exists():
-            r2 = requests.get(url, headers=HEADERS, timeout=120)
+            r2 = _sec_get(url, timeout=120)
             r2.raise_for_status()
             cache_path.write_bytes(r2.content)
         return cache_path
@@ -133,9 +190,8 @@ def get_xbrl_facts(ticker: str) -> dict:
     cache = BASE_DIR / f"xbrl/xbrl_{ticker}.json"
     if cache.exists():
         return json.loads(cache.read_text())
-    r = requests.get(
+    r = _sec_get(
         f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json",
-        headers=HEADERS,
         timeout=45,
     )
     r.raise_for_status()

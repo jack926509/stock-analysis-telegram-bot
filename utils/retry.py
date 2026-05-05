@@ -8,8 +8,11 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MAX_RETRIES = 1
-DEFAULT_BASE_DELAY = 2.0
+# 對 transient 錯誤多給一次機會，並把首次退避縮短：
+# 原: max_retries=1, base_delay=2.0 → 嘗試 t=0 / t=2，總 budget 2s
+# 新: max_retries=2, base_delay=1.0 → 嘗試 t=0 / t=1 / t=3，總 budget 3s
+DEFAULT_MAX_RETRIES = 2
+DEFAULT_BASE_DELAY = 1.0
 
 
 async def retry_async_call(coro_func, *args,
