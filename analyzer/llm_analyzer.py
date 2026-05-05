@@ -1,7 +1,8 @@
 """
-Anthropic Claude AI 分析引擎。
-- 透過 utils.ai_client 共用 AsyncAnthropic 實例
-- 系統提示使用 Prompt Caching（cache_control=ephemeral）以降低 token 成本
+LLM 分析引擎（OpenRouter，OpenAI-compatible）。
+- 透過 utils.ai_client 共用 AsyncOpenAI 實例（指向 OpenRouter）
+- system prompt 走 OpenRouter cache_control passthrough；routed 到 Anthropic
+  模型時會啟用 prompt caching，降低 token 成本
 - 輸出純文字，在 formatter 層統一做 HTML 跳脫
 """
 
@@ -9,7 +10,7 @@ import json
 import logging
 
 from config import Config
-from utils.ai_client import cached_system, get_ai_client
+from utils.ai_client import extract_text, get_ai_client, system_message
 
 logger = logging.getLogger(__name__)
 
@@ -206,7 +207,7 @@ async def analyze_stock(
     signals_data: dict | None = None,
 ) -> str:
     """
-    使用 Anthropic Claude 分析股票數據。
+    透過 OpenRouter 呼叫 LLM 分析股票數據。
 
     Returns:
         str: AI 生成的分析文本
@@ -231,18 +232,18 @@ async def analyze_stock(
 
 請開始你的分析報告："""
 
-        response = await client.messages.create(
-            model=Config.ANTHROPIC_MODEL,
+        response = await client.chat.completions.create(
+            model=Config.OPENROUTER_MODEL,
             max_tokens=2400,
-            system=cached_system(SYSTEM_PROMPT),
             messages=[
+                system_message(SYSTEM_PROMPT),
                 {"role": "user", "content": user_prompt},
             ],
             temperature=0.3,
             timeout=60,
         )
 
-        return response.content[0].text
+        return extract_text(response)
 
     except Exception as e:
         logger.warning(f"AI 分析失敗 [{ticker}]: {e}", exc_info=True)

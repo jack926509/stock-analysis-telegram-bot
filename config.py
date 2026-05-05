@@ -31,11 +31,23 @@ class Config:
     # ── Tavily ──
     TAVILY_API_KEY: str = os.getenv("TAVILY_API_KEY", "")
 
-    # ── Anthropic ──
-    ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
-    ANTHROPIC_MODEL: str = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6")
-    # Newsletter planner 用較便宜的 Haiku（純 JSON 結構規劃，不需 Sonnet）
-    ANTHROPIC_PLANNER_MODEL: str = os.getenv("ANTHROPIC_PLANNER_MODEL", "claude-haiku-4-5-20251001")
+    # ── LLM (OpenRouter, OpenAI-compatible) ──
+    # 預設走 Anthropic Claude routed via OpenRouter 以保留 prompt caching 紅利。
+    # 可改 openai/gpt-4o、google/gemini-2.5-pro 等任何 OpenRouter 支援的模型。
+    OPENROUTER_API_KEY: str = os.getenv("OPENROUTER_API_KEY", "")
+    OPENROUTER_BASE_URL: str = os.getenv(
+        "OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"
+    )
+    OPENROUTER_MODEL: str = os.getenv("OPENROUTER_MODEL", "anthropic/claude-sonnet-4.5")
+    # Newsletter planner / tenk 中的結構化任務用較便宜的 Haiku
+    OPENROUTER_PLANNER_MODEL: str = os.getenv(
+        "OPENROUTER_PLANNER_MODEL", "anthropic/claude-haiku-4.5"
+    )
+    # OpenRouter 排行榜歸屬（選填，OpenRouter 推薦但非必要）
+    OPENROUTER_HTTP_REFERER: str = os.getenv("OPENROUTER_HTTP_REFERER", "")
+    OPENROUTER_APP_TITLE: str = os.getenv(
+        "OPENROUTER_APP_TITLE", "Stock Analysis Telegram Bot"
+    )
 
     # ── 健康檢查 ──
     HEALTH_PORT: int = int(os.getenv("HEALTH_PORT", "8080"))
@@ -82,8 +94,8 @@ class Config:
             missing.append("FINNHUB_API_KEY")
         if not cls.TAVILY_API_KEY:
             missing.append("TAVILY_API_KEY")
-        if not cls.ANTHROPIC_API_KEY:
-            missing.append("ANTHROPIC_API_KEY")
+        if not cls.OPENROUTER_API_KEY:
+            missing.append("OPENROUTER_API_KEY")
 
         if cls.BOT_MODE == "webhook" and not cls.WEBHOOK_URL:
             missing.append("WEBHOOK_URL (webhook 模式必需)")

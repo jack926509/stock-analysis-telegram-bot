@@ -41,7 +41,7 @@ from fetchers.analyst_fetcher import fetch_analyst_data
 from fetchers.insider_fetcher import fetch_insider_transactions
 from fetchers.earnings_surprise_fetcher import fetch_earnings_surprises
 from fetchers.macro_fetcher import fetch_macro_data
-from analyzer.anthropic_analyzer import analyze_stock
+from analyzer.llm_analyzer import analyze_stock
 from utils.formatter import format_report
 from utils.cache import raw_cache, report_cache, news_cache
 from utils.chart import generate_chart
