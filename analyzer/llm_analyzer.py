@@ -1,8 +1,8 @@
 """
-LLM 分析引擎（OpenRouter，OpenAI-compatible）。
-- 透過 utils.ai_client 共用 AsyncOpenAI 實例（指向 OpenRouter）
-- system prompt 走 OpenRouter cache_control passthrough；routed 到 Anthropic
-  模型時會啟用 prompt caching，降低 token 成本
+LLM 分析引擎（OpenAI 官方 API）。
+- 透過 utils.ai_client 共用 AsyncOpenAI 實例
+- 長 system prompt（≥1024 tokens）由 OpenAI 自動 prompt caching；
+  caller 不需手動 hint，只要 SYSTEM_PROMPT 保持穩定即可命中折扣
 - 輸出純文字，在 formatter 層統一做 HTML 跳脫
 """
 
@@ -207,7 +207,7 @@ async def analyze_stock(
     signals_data: dict | None = None,
 ) -> str:
     """
-    透過 OpenRouter 呼叫 LLM 分析股票數據。
+    透過 OpenAI API 分析股票數據。
 
     Returns:
         str: AI 生成的分析文本
@@ -233,7 +233,7 @@ async def analyze_stock(
 請開始你的分析報告："""
 
         response = await client.chat.completions.create(
-            model=Config.OPENROUTER_MODEL,
+            model=Config.OPENAI_MODEL,
             max_tokens=2400,
             messages=[
                 system_message(SYSTEM_PROMPT),

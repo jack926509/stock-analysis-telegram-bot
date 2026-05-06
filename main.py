@@ -116,7 +116,7 @@ def main():
 
     # 啟動 Bot
     logger.info("🚀 正在啟動美股分析 Bot...")
-    logger.info(f"📦 LLM (OpenRouter): {Config.OPENROUTER_MODEL}")
+    logger.info(f"📦 LLM (OpenAI): {Config.OPENAI_MODEL}")
     logger.info(f"🌍 環境: {Config.ENV}")
     logger.info(f"📡 模式: {Config.BOT_MODE}")
 
