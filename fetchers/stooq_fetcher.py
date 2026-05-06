@@ -13,8 +13,20 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-_YAHOO_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
-_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; stock-analysis-bot)"}
+_YAHOO_HOSTS = ("query1.finance.yahoo.com", "query2.finance.yahoo.com")
+_YAHOO_URL_TMPL = "https://{host}/v8/finance/chart/{symbol}"
+# Yahoo 會 block 自我宣告為 bot 的 UA，必須假裝成真實瀏覽器
+_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Origin": "https://finance.yahoo.com",
+    "Referer": "https://finance.yahoo.com/",
+}
 
 
 def _to_yahoo_symbol(ticker: str) -> str:
@@ -47,18 +59,26 @@ async def fetch_stooq_history(ticker: str, days: int = 252) -> list[dict] | None
     """
     symbol = _to_yahoo_symbol(ticker)
     rng = _pick_range(days)
-    try:
-        async with httpx.AsyncClient(timeout=15, headers=_HEADERS) as client:
-            resp = await client.get(
-                _YAHOO_URL.format(symbol=symbol),
-                params={"range": rng, "interval": "1d"},
-            )
-    except Exception as e:
-        logger.warning(f"[Yahoo] {ticker} 連線失敗: {e}")
-        return None
+    params = {"range": rng, "interval": "1d"}
 
-    if resp.status_code != 200:
-        logger.warning(f"[Yahoo] {ticker} HTTP {resp.status_code}")
+    resp = None
+    last_err: str | None = None
+    async with httpx.AsyncClient(timeout=15, headers=_HEADERS, follow_redirects=True) as client:
+        for host in _YAHOO_HOSTS:
+            url = _YAHOO_URL_TMPL.format(host=host, symbol=symbol)
+            try:
+                resp = await client.get(url, params=params)
+            except Exception as e:
+                last_err = f"連線失敗 ({host}): {e}"
+                resp = None
+                continue
+            if resp.status_code == 200:
+                break
+            last_err = f"HTTP {resp.status_code} ({host}): {resp.text[:120]}"
+            resp = None
+
+    if resp is None:
+        logger.warning(f"[Yahoo] {ticker} 取得歷史失敗：{last_err}")
         return None
 
     try:
