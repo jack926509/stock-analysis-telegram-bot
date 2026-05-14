@@ -17,12 +17,12 @@ _db_lock = asyncio.Lock()
 
 
 def _get_connection() -> sqlite3.Connection:
-    """取得資料庫連線並確保表存在。"""
+    """取得資料庫連線並確保表存在。Slack user_id 為字串型別。"""
     conn = sqlite3.connect(DB_PATH)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS watchlist (
-            user_id INTEGER NOT NULL,
+            user_id TEXT NOT NULL,
             ticker TEXT NOT NULL,
             added_at TEXT NOT NULL,
             PRIMARY KEY (user_id, ticker)
@@ -31,11 +31,15 @@ def _get_connection() -> sqlite3.Connection:
     conn.execute("""
         CREATE TABLE IF NOT EXISTS query_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
+            user_id TEXT NOT NULL,
             ticker TEXT NOT NULL,
             queried_at TEXT NOT NULL
         )
     """)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_query_history_user_time "
+        "ON query_history (user_id, queried_at)"
+    )
     # tenk 報告索引（用於半年快取查詢，避免重跑）
     conn.execute("""
         CREATE TABLE IF NOT EXISTS tenk_reports (
@@ -53,7 +57,7 @@ def _get_connection() -> sqlite3.Connection:
     # tenk 每日次數計數
     conn.execute("""
         CREATE TABLE IF NOT EXISTS tenk_usage (
-            user_id INTEGER NOT NULL,
+            user_id TEXT NOT NULL,
             day TEXT NOT NULL,
             count INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (user_id, day)
@@ -130,7 +134,7 @@ async def tenk_save_report(
         await asyncio.to_thread(_op)
 
 
-async def tenk_get_daily_count(user_id: int) -> int:
+async def tenk_get_daily_count(user_id: str) -> int:
     """取得使用者今日（UTC）的 /tenk 使用次數。"""
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     async with _db_lock:
@@ -148,7 +152,7 @@ async def tenk_get_daily_count(user_id: int) -> int:
         return await asyncio.to_thread(_op)
 
 
-async def tenk_increment_daily(user_id: int) -> int:
+async def tenk_increment_daily(user_id: str) -> int:
     """+1 並回傳新計數。"""
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     async with _db_lock:
@@ -173,7 +177,7 @@ async def tenk_increment_daily(user_id: int) -> int:
         return await asyncio.to_thread(_op)
 
 
-async def add_to_watchlist(user_id: int, ticker: str) -> bool:
+async def add_to_watchlist(user_id: str, ticker: str) -> bool:
     """新增股票到自選股清單。回傳是否新增成功（False 表示已存在）。"""
     async with _db_lock:
         def _op():
@@ -190,7 +194,7 @@ async def add_to_watchlist(user_id: int, ticker: str) -> bool:
         return await asyncio.to_thread(_op)
 
 
-async def remove_from_watchlist(user_id: int, ticker: str) -> bool:
+async def remove_from_watchlist(user_id: str, ticker: str) -> bool:
     """從自選股清單移除。回傳是否成功移除。"""
     async with _db_lock:
         def _op():
@@ -207,7 +211,7 @@ async def remove_from_watchlist(user_id: int, ticker: str) -> bool:
         return await asyncio.to_thread(_op)
 
 
-async def get_watchlist(user_id: int) -> list[str]:
+async def get_watchlist(user_id: str) -> list[str]:
     """取得使用者的自選股清單。"""
     async with _db_lock:
         def _op():
@@ -223,7 +227,7 @@ async def get_watchlist(user_id: int) -> list[str]:
         return await asyncio.to_thread(_op)
 
 
-async def record_query(user_id: int, ticker: str) -> None:
+async def record_query(user_id: str, ticker: str) -> None:
     """記錄查詢歷史。"""
     async with _db_lock:
         def _op():
@@ -239,7 +243,7 @@ async def record_query(user_id: int, ticker: str) -> None:
         await asyncio.to_thread(_op)
 
 
-async def get_user_query_count(user_id: int, window_seconds: int = 60) -> int:
+async def get_user_query_count(user_id: str, window_seconds: int = 60) -> int:
     """取得使用者在時間窗口內的查詢次數（用於 rate limiting）。"""
     async with _db_lock:
         def _op():
@@ -258,7 +262,7 @@ async def get_user_query_count(user_id: int, window_seconds: int = 60) -> int:
         return await asyncio.to_thread(_op)
 
 
-async def get_user_stats(user_id: int) -> dict:
+async def get_user_stats(user_id: str) -> dict:
     """單次撈出 /stats 需要的全部數據（今日/本月查詢、Top 5、自選股數）。"""
     now = datetime.now(timezone.utc)
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()

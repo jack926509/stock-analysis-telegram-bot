@@ -1,8 +1,14 @@
 """
 設定管理模組
-集中管理所有環境變數與應用設定。
-支援 dev/staging/production 環境配置。
+集中管理所有環境變數與應用設定，支援 dev/staging/production 環境。
+
+設計原則：
+- 所有環境變數在這裡集中讀取一次，避免散落各處
+- 啟動時呼叫 Config.validate() 失敗即退出（fail-fast）
+- 純 class attributes，匯入即可用；不引入 Pydantic 額外依賴
 """
+
+from __future__ import annotations
 
 import os
 import sys
@@ -11,16 +17,38 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
+def _bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
 class Config:
     """應用程式設定"""
 
     # ── 環境 ──
     ENV: str = os.getenv("APP_ENV", "production")  # dev / staging / production
 
-    # ── Telegram ──
-    TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
-    BOT_MODE: str = os.getenv("BOT_MODE", "polling")  # polling / webhook
-    WEBHOOK_URL: str = os.getenv("WEBHOOK_URL", "")  # Webhook 模式需要設定
+    # ── Slack ──
+    # Bot Token (xoxb-…)：呼叫 Web API 用，scopes 詳見 README
+    SLACK_BOT_TOKEN: str = os.getenv("SLACK_BOT_TOKEN", "")
+    # App-Level Token (xapp-…)：Socket Mode 用，scope: connections:write
+    SLACK_APP_TOKEN: str = os.getenv("SLACK_APP_TOKEN", "")
+    # Signing Secret：HTTP 模式驗 webhook 用；Socket Mode 可空
+    SLACK_SIGNING_SECRET: str = os.getenv("SLACK_SIGNING_SECRET", "")
+    # 預設播報頻道：留空時 bot 只在被 mention / DM / slash command 的當前頻道回覆
+    SLACK_DEFAULT_CHANNEL: str = os.getenv("SLACK_DEFAULT_CHANNEL", "")
 
     # ── Finnhub ──
     FINNHUB_API_KEY: str = os.getenv("FINNHUB_API_KEY", "")
@@ -35,56 +63,51 @@ class Config:
     # OpenAI 對長 system prompt（≥1024 tokens）會自動 prompt caching，無需額外 hint，
     # 命中時 input tokens 享 50% 折扣。
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
-    # 自訂 base URL（如 Azure OpenAI / 自架 proxy）；空字串走 SDK 預設
     OPENAI_BASE_URL: str = os.getenv("OPENAI_BASE_URL", "")
     OPENAI_ORG_ID: str = os.getenv("OPENAI_ORG_ID", "")
     OPENAI_PROJECT_ID: str = os.getenv("OPENAI_PROJECT_ID", "")
-    # 主分析模型 — 需要較強推理
     OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-4o")
-    # 結構化任務（newsletter planner / tenk 中的 JSON 萃取與分類）— 用 mini 省錢
     OPENAI_PLANNER_MODEL: str = os.getenv("OPENAI_PLANNER_MODEL", "gpt-4o-mini")
 
     # ── 健康檢查 ──
-    HEALTH_PORT: int = int(os.getenv("HEALTH_PORT", "8080"))
-    HEALTH_ENABLED: bool = os.getenv("HEALTH_ENABLED", "true").lower() == "true"
+    HEALTH_PORT: int = _int("HEALTH_PORT", 8080)
+    HEALTH_ENABLED: bool = _bool("HEALTH_ENABLED", True)
 
     # ── Rate Limiting ──
-    RATE_LIMIT_PER_MINUTE: int = int(os.getenv("RATE_LIMIT_PER_MINUTE", "5"))
+    RATE_LIMIT_PER_MINUTE: int = _int("RATE_LIMIT_PER_MINUTE", 5)
+
+    # ── 並發控制 ──
+    ANALYSIS_CONCURRENCY: int = _int("ANALYSIS_CONCURRENCY", 3)
 
     # ── 資料庫 ──
     DB_PATH: str = os.getenv("DB_PATH", "bot_data.db")
 
     # ── 快取 ──
-    CACHE_TTL: int = int(os.getenv("CACHE_TTL", "300"))  # 秒
+    CACHE_TTL: int = _int("CACHE_TTL", 300)
 
-    # ── 同業比較 ──
-    PEER_COMPARISON_ENABLED: bool = os.getenv("PEER_COMPARISON_ENABLED", "true").lower() == "true"
-
-    # ── 歷史回測 ──
-    HISTORY_ENABLED: bool = os.getenv("HISTORY_ENABLED", "true").lower() == "true"
-
-    # ── Newsletter 日報 ──
-    NEWSLETTER_ENABLED: bool = os.getenv("NEWSLETTER_ENABLED", "true").lower() == "true"
+    # ── 同業比較 / 歷史 / 日報 ──
+    PEER_COMPARISON_ENABLED: bool = _bool("PEER_COMPARISON_ENABLED", True)
+    HISTORY_ENABLED: bool = _bool("HISTORY_ENABLED", True)
+    NEWSLETTER_ENABLED: bool = _bool("NEWSLETTER_ENABLED", True)
 
     # ── 10-K / 10-Q 深度分析（tenk）──
-    # 寫死預設值，Zeabur 不需要設定新環境變數
     TENK_ENABLED: bool = True
-    TENK_CACHE_DIR: str = "data/tenk_cache"  # 財報 HTM、章節切割快取
-    TENK_OUTPUT_DIR: str = "data/tenk_output"  # 報告 markdown + context log
-    TENK_DAILY_LIMIT: int = 3  # 每用戶每日次數
-    TENK_REPORT_TTL_DAYS: int = 180  # 半年內不重跑
-    TENK_PIPELINE_TIMEOUT: int = 1800  # 單次最長 30 分鐘
-    # SEC EDGAR 要求 User-Agent 含可聯絡資訊（避免被擋）
-    TENK_SEC_USER_AGENT: str = "stock-analysis-telegram-bot xieh.gemini@gmail.com"
-    # LlamaParse 是 doc_converter 的 fallback，沒有就走 markitdown（保留 env 讀取，未設則停用）
+    TENK_CACHE_DIR: str = "data/tenk_cache"
+    TENK_OUTPUT_DIR: str = "data/tenk_output"
+    TENK_DAILY_LIMIT: int = 3
+    TENK_REPORT_TTL_DAYS: int = 180
+    TENK_PIPELINE_TIMEOUT: int = 1800
+    TENK_SEC_USER_AGENT: str = "stock-analysis-slack-bot xieh.gemini@gmail.com"
     LLAMA_CLOUD_API_KEY: str = os.getenv("LLAMA_CLOUD_API_KEY", "")
 
     @classmethod
     def validate(cls) -> None:
-        """驗證所有必要的環境變數是否已設定。"""
-        missing = []
-        if not cls.TELEGRAM_BOT_TOKEN:
-            missing.append("TELEGRAM_BOT_TOKEN")
+        """驗證所有必要的環境變數是否已設定。失敗即 exit(1)。"""
+        missing: list[str] = []
+        if not cls.SLACK_BOT_TOKEN:
+            missing.append("SLACK_BOT_TOKEN (xoxb-…)")
+        if not cls.SLACK_APP_TOKEN:
+            missing.append("SLACK_APP_TOKEN (xapp-…)")
         if not cls.FINNHUB_API_KEY:
             missing.append("FINNHUB_API_KEY")
         if not cls.TAVILY_API_KEY:
@@ -92,8 +115,10 @@ class Config:
         if not cls.OPENAI_API_KEY:
             missing.append("OPENAI_API_KEY")
 
-        if cls.BOT_MODE == "webhook" and not cls.WEBHOOK_URL:
-            missing.append("WEBHOOK_URL (webhook 模式必需)")
+        if cls.SLACK_BOT_TOKEN and not cls.SLACK_BOT_TOKEN.startswith("xoxb-"):
+            missing.append("SLACK_BOT_TOKEN 應以 xoxb- 開頭")
+        if cls.SLACK_APP_TOKEN and not cls.SLACK_APP_TOKEN.startswith("xapp-"):
+            missing.append("SLACK_APP_TOKEN 應以 xapp- 開頭（Socket Mode App-Level Token）")
 
         if missing:
             print(f"❌ 缺少必要環境變數: {', '.join(missing)}")
