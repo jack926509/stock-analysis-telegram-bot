@@ -42,8 +42,12 @@ def _setup_logging() -> None:
 
 
 async def _run() -> None:
-    """非同步啟動 Bot（Socket Mode + 健康檢查 + Graceful Shutdown）。"""
-    # 1. 健康檢查
+    """非同步啟動 Bot（Postgres pool + Socket Mode + 健康檢查 + Graceful Shutdown）。"""
+    # 1. Postgres pool + schema migration（最先做，後面所有 handler 都依賴它）
+    from utils.database import init_db
+    await init_db()
+
+    # 2. 健康檢查
     health_runner = None
     if Config.HEALTH_ENABLED:
         try:
@@ -52,16 +56,16 @@ async def _run() -> None:
         except Exception as e:
             logger.warning(f"⚠️ 健康檢查啟動失敗: {e}")
 
-    # 2. 非阻塞清理舊 tenk 檔案
+    # 3. 非阻塞清理舊 tenk 檔案
     if Config.TENK_ENABLED:
         from utils.cleanup import cleanup_tenk_files
         asyncio.create_task(cleanup_tenk_files())
 
-    # 3. 啟動時觸發日報生成（若啟用，非阻塞）
+    # 4. 啟動時觸發日報生成（若啟用，非阻塞）
     if Config.NEWSLETTER_ENABLED:
         asyncio.create_task(_run_newsletter_on_startup())
 
-    # 4. 建立 Slack App + Socket Mode handler
+    # 5. 建立 Slack App + Socket Mode handler
     from bot.slack_bot import create_slack_app
     from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
 
@@ -105,6 +109,9 @@ async def _run() -> None:
         if health_runner:
             await health_runner.cleanup()
             logger.info("🏥 健康檢查端點已關閉")
+        # 最後關 DB pool，確保所有進行中的查詢已經結束
+        from utils.database import close_db
+        await close_db()
         logger.info("👋 Bot 已完全關閉")
 
 
