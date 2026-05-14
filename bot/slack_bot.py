@@ -15,7 +15,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-import time
 from datetime import datetime, timezone
 
 from slack_bolt.async_app import AsyncApp
@@ -34,7 +33,7 @@ from fetchers.stooq_fetcher import fetch_stooq_history
 from fetchers.tavily_fetcher import fetch_tavily_news
 from fetchers.tradingview_fetcher import fetch_tradingview_analysis
 from analyzer.llm_analyzer import analyze_stock
-from utils.cache import news_cache, raw_cache, report_cache
+from utils.cache import LRUCache, news_cache, raw_cache, report_cache
 from utils.chart import generate_chart
 from utils.database import (
     add_to_watchlist,
@@ -46,6 +45,7 @@ from utils.database import (
 from utils.formatter import format_report
 from utils.rate_limiter import rate_limiter
 from utils.signals import compute_signals
+from utils.slack_api import post_message
 from utils.slack_formatter import (
     actions,
     button,
@@ -76,14 +76,23 @@ logger = logging.getLogger(__name__)
 _analysis_semaphore = asyncio.Semaphore(Config.ANALYSIS_CONCURRENCY)
 # (channel, user) → asyncio.Task；/cancel 用
 _running_tasks: dict[tuple[str, str], asyncio.Task] = {}
+# 全域同時排隊上限（防 DoS / OOM）；超過此值直接拒絕新請求
+_MAX_INFLIGHT_TASKS = max(20, Config.ANALYSIS_CONCURRENCY * 10)
+
+
+def _purge_done_tasks() -> None:
+    """清掉 dict 中已結束的 task，避免無限堆積。"""
+    for key in [k for k, t in _running_tasks.items() if t.done()]:
+        _running_tasks.pop(key, None)
 
 # 超時
 FETCH_TIMEOUT = 45
 EXTENDED_FETCH_TIMEOUT = 60
 AI_TIMEOUT = 90
 
-_TICKER_PATTERN = re.compile(r"^[A-Z0-9]{1,5}$")
-_TICKER_HINT = "需 1–5 個英文字母或數字，例如 `AAPL`"
+# Ticker 規則：1–5 個英數字，但至少包含 1 個字母（避免 "12345" 這種純數字）
+_TICKER_PATTERN = re.compile(r"^(?=[A-Z0-9]{1,5}$)[A-Z0-9]*[A-Z][A-Z0-9]*$")
+_TICKER_HINT = "需 1–5 個英數字且至少含 1 個字母，例如 `AAPL`"
 
 
 def _validate_ticker(ticker: str) -> bool:
@@ -172,11 +181,9 @@ def _earnings_days(earnings_str) -> int | None:
         return None
 
 
-# sparkline cache（30 分鐘，LRU 上限）
+# sparkline cache（30 分鐘 TTL，LRU 500）
 _SPARK_CHARS = "▁▂▃▄▅▆▇█"
-_SPARK_TTL = 1800
-_SPARK_CACHE_MAX = 500
-_sparkline_cache: dict[str, tuple[str, float]] = {}
+_sparkline_cache = LRUCache(ttl=1800, max_entries=500)
 
 
 def _sparkline(closes: list[float]) -> str:
@@ -192,62 +199,43 @@ def _sparkline(closes: list[float]) -> str:
     )
 
 
-def _spark_set(ticker: str, spark: str) -> None:
-    _sparkline_cache[ticker] = (spark, time.time())
-    if len(_sparkline_cache) > _SPARK_CACHE_MAX:
-        oldest = min(_sparkline_cache.items(), key=lambda kv: kv[1][1])[0]
-        _sparkline_cache.pop(oldest, None)
-
-
 async def _get_sparkline(ticker: str, points: int = 7) -> str:
-    entry = _sparkline_cache.get(ticker)
-    if entry:
-        spark, ts = entry
-        if time.time() - ts < _SPARK_TTL:
-            return spark
+    cached = _sparkline_cache.get(ticker)
+    if cached is not None:
+        return cached  # 可能是 "" 表示已知無資料
     try:
         rows = await fetch_stooq_history(ticker, days=points + 3)
     except Exception as e:
         logger.debug(f"[sparkline] {ticker} history fetch failed: {e}")
         rows = None
     if not rows:
-        _spark_set(ticker, "")
+        _sparkline_cache.set(ticker, "")
         return ""
     closes = [r["close"] for r in rows[-points:]]
     spark = _sparkline(closes)
-    _spark_set(ticker, spark)
+    _sparkline_cache.set(ticker, spark)
     return spark
 
 
 # /watchlist 結果快取（120s，避免短時重複敲指令吃光 FMP 配額）
-_WL_CACHE_TTL = 120
-_WL_CACHE_MAX = 200
-_watchlist_cache: dict[tuple, tuple[dict, float]] = {}
+_watchlist_cache = LRUCache(ttl=120, max_entries=200)
+
+
+def _wl_cache_key(key: tuple) -> str:
+    """tuple → str（LRUCache 用 str key）。"""
+    return "|".join(map(str, key))
 
 
 def _wl_cache_get(key: tuple) -> dict | None:
-    entry = _watchlist_cache.get(key)
-    if not entry:
-        return None
-    data, ts = entry
-    if time.time() - ts > _WL_CACHE_TTL:
-        _watchlist_cache.pop(key, None)
-        return None
-    return data
+    return _watchlist_cache.get(_wl_cache_key(key))  # type: ignore[return-value]
 
 
 def _wl_cache_set(key: tuple, data: dict) -> None:
-    _watchlist_cache[key] = (data, time.time())
-    if len(_watchlist_cache) > _WL_CACHE_MAX:
-        oldest_key = min(_watchlist_cache.items(), key=lambda kv: kv[1][1])[0]
-        _watchlist_cache.pop(oldest_key, None)
+    _watchlist_cache.set(_wl_cache_key(key), data)
 
 
 def _wl_cache_age(key: tuple) -> int | None:
-    entry = _watchlist_cache.get(key)
-    if not entry:
-        return None
-    return int(time.time() - entry[1])
+    return _watchlist_cache.get_age(_wl_cache_key(key))
 
 
 # ══════════════════════════════════════════
@@ -290,27 +278,24 @@ async def _send_report(
     first_blocks.append(_report_actions_block(ticker, watched=watched))
 
     first_text = fallback_text(first_blocks)
-    head_resp = await client.chat_postMessage(
-        channel=channel,
+    head_resp = await post_message(
+        client, channel,
         text=first_text,
         blocks=first_blocks,
-        unfurl_links=False,
-        unfurl_media=False,
     )
     thread_ts = head_resp.get("ts")
 
-    # 後續訊息切片，全部 thread 中 + 靜音
+    # 後續訊息切片，全部 thread 中 + 靜音；用 retry helper 並間隔 ~100ms 緩解 rate-limit
     body_blocks = mrkdwn_to_blocks(body) if body else []
-    for blocks in split_blocks_into_messages(body_blocks):
-        if not blocks:
-            continue
-        await client.chat_postMessage(
-            channel=channel,
-            thread_ts=thread_ts,
+    chunks = [b for b in split_blocks_into_messages(body_blocks) if b]
+    for i, blocks in enumerate(chunks):
+        if i > 0:
+            await asyncio.sleep(0.1)
+        await post_message(
+            client, channel,
             text=fallback_text(blocks),
             blocks=blocks,
-            unfurl_links=False,
-            unfurl_media=False,
+            thread_ts=thread_ts,
         )
 
 
@@ -818,18 +803,31 @@ async def _dispatch_analysis(
         return
 
     # 並發控制
+    _purge_done_tasks()
+    if len(_running_tasks) >= _MAX_INFLIGHT_TASKS:
+        await post_message(
+            client, channel,
+            text=(
+                f"🛑 系統排隊已滿（{_MAX_INFLIGHT_TASKS} 筆），請稍候 1-2 分鐘再試 "
+                f"`/report {ticker}`"
+            ),
+        )
+        return
     if _analysis_semaphore.locked():
-        await client.chat_postMessage(
-            channel=channel,
-            text=f"⏳ 系統繁忙中，目前有 {Config.ANALYSIS_CONCURRENCY} 筆分析在跑，稍後重試 `/report {ticker}`",
+        await post_message(
+            client, channel,
+            text=(
+                f"⏳ 系統繁忙中，目前有 {Config.ANALYSIS_CONCURRENCY} 筆分析在跑，"
+                f"稍後重試 `/report {ticker}`"
+            ),
         )
         return
 
     key = (channel, user_id)
     existing = _running_tasks.get(key)
     if existing and not existing.done():
-        await client.chat_postMessage(
-            channel=channel,
+        await post_message(
+            client, channel,
             text="⏳ 你已有一筆分析在跑，用 `/cancel` 中止後再重試",
         )
         return

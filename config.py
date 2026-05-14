@@ -10,11 +10,14 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 from dotenv import load_dotenv
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 
 def _bool(name: str, default: bool) -> bool:
@@ -45,7 +48,7 @@ class Config:
     SLACK_BOT_TOKEN: str = os.getenv("SLACK_BOT_TOKEN", "")
     # App-Level Token (xapp-…)：Socket Mode 用，scope: connections:write
     SLACK_APP_TOKEN: str = os.getenv("SLACK_APP_TOKEN", "")
-    # Signing Secret：HTTP 模式驗 webhook 用；Socket Mode 可空
+    # Signing Secret：HTTP 模式驗 webhook 用；Socket Mode 可空但 production 建議設
     SLACK_SIGNING_SECRET: str = os.getenv("SLACK_SIGNING_SECRET", "")
     # 預設播報頻道：留空時 bot 只在被 mention / DM / slash command 的當前頻道回覆
     SLACK_DEFAULT_CHANNEL: str = os.getenv("SLACK_DEFAULT_CHANNEL", "")
@@ -86,9 +89,10 @@ class Config:
         os.getenv("DATABASE_URL")
         or os.getenv("POSTGRES_CONNECTION_STRING", "")
     )
-    # 連線池大小
+    # 連線池大小：production 預設提高到 15，因為 newsletter + watchlist + tenk
+    # 可能在背景並發查詢。可透過 DB_POOL_MAX 環境變數覆寫。
     DB_POOL_MIN: int = _int("DB_POOL_MIN", 1)
-    DB_POOL_MAX: int = _int("DB_POOL_MAX", 10)
+    DB_POOL_MAX: int = _int("DB_POOL_MAX", 15)
     # 連線取得逾時（秒）— 避免在 pool 滿時無限等待
     DB_POOL_TIMEOUT: int = _int("DB_POOL_TIMEOUT", 30)
 
@@ -101,18 +105,24 @@ class Config:
     NEWSLETTER_ENABLED: bool = _bool("NEWSLETTER_ENABLED", True)
 
     # ── 10-K / 10-Q 深度分析（tenk）──
-    TENK_ENABLED: bool = True
-    TENK_CACHE_DIR: str = "data/tenk_cache"
-    TENK_OUTPUT_DIR: str = "data/tenk_output"
-    TENK_DAILY_LIMIT: int = 3
-    TENK_REPORT_TTL_DAYS: int = 180
-    TENK_PIPELINE_TIMEOUT: int = 1800
-    TENK_SEC_USER_AGENT: str = "stock-analysis-slack-bot xieh.gemini@gmail.com"
+    TENK_ENABLED: bool = _bool("TENK_ENABLED", True)
+    TENK_CACHE_DIR: str = os.getenv("TENK_CACHE_DIR", "data/tenk_cache")
+    TENK_OUTPUT_DIR: str = os.getenv("TENK_OUTPUT_DIR", "data/tenk_output")
+    TENK_DAILY_LIMIT: int = _int("TENK_DAILY_LIMIT", 3)
+    TENK_REPORT_TTL_DAYS: int = _int("TENK_REPORT_TTL_DAYS", 180)
+    TENK_PIPELINE_TIMEOUT: int = _int("TENK_PIPELINE_TIMEOUT", 1800)
+    TENK_SEC_USER_AGENT: str = os.getenv(
+        "TENK_SEC_USER_AGENT", "stock-analysis-slack-bot xieh.gemini@gmail.com"
+    )
     LLAMA_CLOUD_API_KEY: str = os.getenv("LLAMA_CLOUD_API_KEY", "")
 
     @classmethod
     def validate(cls) -> None:
-        """驗證所有必要的環境變數是否已設定。失敗即 exit(1)。"""
+        """驗證所有必要的環境變數是否已設定。失敗即 exit(1)。
+
+        日誌走 stderr / logger，避免在 production 用 print() 漏到 stdout
+        被 log aggregator 視為 INFO 級別。
+        """
         missing: list[str] = []
         if not cls.SLACK_BOT_TOKEN:
             missing.append("SLACK_BOT_TOKEN (xoxb-…)")
@@ -127,15 +137,27 @@ class Config:
         if not cls.DATABASE_URL:
             missing.append("DATABASE_URL (postgresql://user:pass@host:5432/dbname)")
 
+        # Token 前綴/長度檢查
         if cls.SLACK_BOT_TOKEN and not cls.SLACK_BOT_TOKEN.startswith("xoxb-"):
             missing.append("SLACK_BOT_TOKEN 應以 xoxb- 開頭")
         if cls.SLACK_APP_TOKEN and not cls.SLACK_APP_TOKEN.startswith("xapp-"):
             missing.append("SLACK_APP_TOKEN 應以 xapp- 開頭（Socket Mode App-Level Token）")
 
         if missing:
-            print(f"❌ 缺少必要環境變數: {', '.join(missing)}")
-            print("請在 .env 檔案中設定以上變數（參考 .env.example）")
+            err = "❌ 缺少必要環境變數: " + ", ".join(missing)
+            hint = "請在 .env 檔案中設定以上變數（參考 .env.example）"
+            # 直接寫 stderr，避免依賴 logger 在 validate 前的初始化順序
+            print(err, file=sys.stderr)
+            print(hint, file=sys.stderr)
             sys.exit(1)
+
+        # Production 警告：Signing Secret 雖然 Socket Mode 不必要，但若未來切 HTTP
+        # webhook 才不會留下安全洞
+        if cls.is_production() and not cls.SLACK_SIGNING_SECRET:
+            logger.warning(
+                "⚠️ production 環境未設定 SLACK_SIGNING_SECRET。"
+                "Socket Mode 可省略，但切換到 HTTP webhook 模式前務必補上。"
+            )
 
     @classmethod
     def is_dev(cls) -> bool:

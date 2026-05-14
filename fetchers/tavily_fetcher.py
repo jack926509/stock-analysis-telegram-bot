@@ -20,6 +20,16 @@ _tavily_client: TavilyClient | None = None
 # Tavily SDK 不暴露 timeout，呼叫端強制 wait_for。
 _TAVILY_CALL_TIMEOUT = 20.0
 
+# 偵測到無效 API key 後，本次程序內全部跳過 Tavily 呼叫（避免無止境刷錯誤日誌）
+_tavily_key_disabled = False
+
+
+def _looks_like_auth_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return any(
+        kw in msg for kw in ("unauthorized", "invalid api key", "missing api key", "401", "403")
+    )
+
 
 def _get_client() -> TavilyClient:
     """取得共用的 TavilyClient。"""
@@ -40,6 +50,17 @@ async def fetch_tavily_news(ticker: str, company_name: str = "") -> dict:
     Returns:
         dict: 包含 AI 摘要和新聞列表
     """
+    # API key 缺失或被標記為無效時直接降級，避免每次都打到 401 浪費 5s+
+    if not Config.TAVILY_API_KEY or _tavily_key_disabled:
+        return {
+            "source": "Tavily",
+            "ticker": ticker.upper(),
+            "ai_summary": "News data unavailable (Tavily 未設定或金鑰無效)",
+            "news_count": 0,
+            "news": [],
+            "skipped": True,
+        }
+
     try:
         client = _get_client()
 
@@ -107,6 +128,24 @@ async def fetch_tavily_news(ticker: str, company_name: str = "") -> dict:
             "news": [],
         }
     except Exception as e:
+        # 認證錯誤 → 整個 process 停用 Tavily（避免每次 fetch 都打三次 401）
+        global _tavily_key_disabled
+        if _looks_like_auth_error(e):
+            if not _tavily_key_disabled:
+                logger.error(
+                    "[Tavily] 偵測到 API key 無效（401/403），本次程序內將停用 Tavily 呼叫。"
+                    "請在 Zeabur 環境變數確認 TAVILY_API_KEY。"
+                )
+            _tavily_key_disabled = True
+            return {
+                "source": "Tavily",
+                "ticker": ticker.upper(),
+                "ai_summary": "News data unavailable (Tavily key invalid)",
+                "news_count": 0,
+                "news": [],
+                "skipped": True,
+            }
+
         logger.warning(f"[Tavily] {ticker} 搜尋失敗: {e}")
         return {
             "source": "Tavily",

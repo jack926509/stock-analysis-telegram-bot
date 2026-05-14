@@ -44,8 +44,13 @@ def _setup_logging() -> None:
 async def _run() -> None:
     """非同步啟動 Bot（Postgres pool + Socket Mode + 健康檢查 + Graceful Shutdown）。"""
     # 1. Postgres pool + schema migration（最先做，後面所有 handler 都依賴它）
+    #    用 timeout 包住避免 DB 卡死導致 Zeabur 健康檢查反覆失敗 → 容器重啟迴圈
     from utils.database import init_db
-    await init_db()
+    try:
+        await asyncio.wait_for(init_db(), timeout=30)
+    except asyncio.TimeoutError:
+        logger.error("❌ init_db 逾時（30s），Postgres 連線或 migration 卡住，退出讓 Zeabur 重啟")
+        sys.exit(1)
 
     # 2. 健康檢查
     health_runner = None
@@ -116,16 +121,27 @@ async def _run() -> None:
 
 
 async def _run_newsletter_on_startup() -> None:
-    """啟動時非同步執行日報生成。"""
+    """啟動時非同步執行日報生成。
+
+    給 5 秒延遲讓 Slack handler 先 ready；用 timeout 避免長尾 AI 呼叫
+    把背景 task 拖到容器被殺。
+    """
     newsletter_logger = logging.getLogger("newsletter")
+    # 延遲 5 秒，讓主流程（Socket Mode 連線、健康檢查）先 ready
+    await asyncio.sleep(5)
     try:
         from app.pipeline import run_newsletter_pipeline
         newsletter_logger.info("📰 啟動時觸發日報生成...")
-        newsletter = await run_newsletter_pipeline()
+        # 10 分鐘上限：超過就放棄等下個 schedule
+        newsletter = await asyncio.wait_for(
+            run_newsletter_pipeline(), timeout=600
+        )
         if newsletter:
             newsletter_logger.info(f"✅ 日報生成成功（{len(newsletter)} 字）")
         else:
             newsletter_logger.warning("⚠️ 日報生成返回空結果")
+    except asyncio.TimeoutError:
+        newsletter_logger.warning("⚠️ 日報生成逾時（>10min），放棄本次啟動觸發")
     except Exception as e:
         newsletter_logger.error(f"❌ 日報生成失敗: {e}", exc_info=True)
 

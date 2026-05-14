@@ -6,12 +6,23 @@ captcha-based apikey 制（伺服器無法自動申請），已遷移到 Yahoo v
 公開函式名 fetch_stooq_history 保留以維持呼叫端零修改。
 """
 
+import asyncio
 import logging
+import random
+import time
 from datetime import datetime, timezone
 
 import httpx
 
 logger = logging.getLogger(__name__)
+
+# Yahoo 429 後 60s 內全 ticker 都 fail-fast，避免雪崩
+_RATE_LIMIT_COOLDOWN = 60.0
+_rate_limited_until: float = 0.0
+
+# 模組層級共用 client（連線池 + keep-alive）
+_client: httpx.AsyncClient | None = None
+_client_lock = asyncio.Lock()
 
 _YAHOO_HOSTS = ("query1.finance.yahoo.com", "query2.finance.yahoo.com")
 _YAHOO_URL_TMPL = "https://{host}/v8/finance/chart/{symbol}"
@@ -52,33 +63,71 @@ def _pick_range(days: int) -> str:
     return "5y"
 
 
+async def _get_client() -> httpx.AsyncClient:
+    """共用 httpx client（含連線池）。"""
+    global _client
+    if _client is None:
+        async with _client_lock:
+            if _client is None:
+                _client = httpx.AsyncClient(
+                    timeout=15,
+                    headers=_HEADERS,
+                    follow_redirects=True,
+                    limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+                )
+    return _client
+
+
 async def fetch_stooq_history(ticker: str, days: int = 252) -> list[dict] | None:
     """
     從 Yahoo Finance v8 chart 抓日 K 線。返回舊->新時序：
     [{date, open, high, low, close, volume}, ...]
+    遇 429 後 60s 內 fail-fast，避免雪崩。
     """
+    global _rate_limited_until
+
+    # 速率限制冷卻中 → 直接 fail-fast
+    if _rate_limited_until > time.monotonic():
+        logger.debug(
+            f"[Yahoo] {ticker} 跳過：rate-limit 冷卻中 "
+            f"（剩 {_rate_limited_until - time.monotonic():.0f}s）"
+        )
+        return None
+
     symbol = _to_yahoo_symbol(ticker)
     rng = _pick_range(days)
     params = {"range": rng, "interval": "1d"}
 
     resp = None
     last_err: str | None = None
-    async with httpx.AsyncClient(timeout=15, headers=_HEADERS, follow_redirects=True) as client:
-        for host in _YAHOO_HOSTS:
-            url = _YAHOO_URL_TMPL.format(host=host, symbol=symbol)
-            try:
-                resp = await client.get(url, params=params)
-            except Exception as e:
-                last_err = f"連線失敗 ({host}): {e}"
-                resp = None
-                continue
-            if resp.status_code == 200:
-                break
-            last_err = f"HTTP {resp.status_code} ({host}): {resp.text[:120]}"
+    last_status: int | None = None
+    client = await _get_client()
+    for host in _YAHOO_HOSTS:
+        url = _YAHOO_URL_TMPL.format(host=host, symbol=symbol)
+        try:
+            resp = await client.get(url, params=params)
+        except Exception as e:
+            last_err = f"連線失敗 ({host}): {e}"
             resp = None
+            continue
+        if resp.status_code == 200:
+            break
+        last_status = resp.status_code
+        last_err = f"HTTP {resp.status_code} ({host})"
+        resp = None
+        # 429 不重試下一個 host，浪費配額
+        if last_status == 429:
+            break
 
     if resp is None:
-        logger.warning(f"[Yahoo] {ticker} 取得歷史失敗：{last_err}")
+        if last_status == 429:
+            # 設冷卻時間，避免雪崩；用 debug 而非 warning 降噪
+            _rate_limited_until = time.monotonic() + _RATE_LIMIT_COOLDOWN + random.uniform(0, 10)
+            logger.warning(
+                f"[Yahoo] 觸發 429 rate-limit，未來 ~{int(_RATE_LIMIT_COOLDOWN)}s 內跳過 Yahoo 抓取"
+            )
+        else:
+            logger.warning(f"[Yahoo] {ticker} 取得歷史失敗：{last_err}")
         return None
 
     try:

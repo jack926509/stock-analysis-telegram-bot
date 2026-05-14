@@ -1,14 +1,14 @@
 """
 K 線圖生成模組
 從 Stooq 抓 OHLCV，組成 DataFrame 後用 mplfinance 繪圖輸出 PNG。
+
+效能：matplotlib / mplfinance 啟動 import 約 1-2 秒（含 fontManager），
+僅在 /chart 被呼叫時才 lazy import，縮短冷啟動時間。
 """
 
 import asyncio
 import io
 import logging
-
-import mplfinance as mpf
-import pandas as pd
 
 from fetchers.stooq_fetcher import fetch_stooq_history
 
@@ -28,6 +28,10 @@ async def generate_chart(ticker: str, days: int = 60) -> io.BytesIO | None:
 
 
 def _render_chart(ticker: str, rows: list[dict], days: int) -> io.BytesIO | None:
+    # Lazy import：matplotlib backend 初始化會建 font cache（~1-2s）
+    import mplfinance as mpf
+    import pandas as pd
+
     df = pd.DataFrame(
         [
             {

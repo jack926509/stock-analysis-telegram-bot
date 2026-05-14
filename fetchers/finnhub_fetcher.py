@@ -30,6 +30,14 @@ def _get_client() -> finnhub.Client:
     return _finnhub_client
 
 
+def _sanitize(msg: str) -> str:
+    """從錯誤訊息中過濾掉 API key。"""
+    key = Config.FINNHUB_API_KEY
+    if key and key in msg:
+        return msg.replace(key, "***")
+    return msg
+
+
 async def fetch_finnhub_quote(ticker: str) -> dict:
     """
     非同步抓取 Finnhub 即時股價。
@@ -89,10 +97,11 @@ async def fetch_finnhub_quote(ticker: str) -> dict:
             "error": f"Finnhub API 逾時（>{int(_FINNHUB_CALL_TIMEOUT)}s）",
         }
     except Exception as e:
-        logger.warning(f"[Finnhub] {ticker} quote 失敗: {e}")
+        safe_msg = _sanitize(str(e))
+        logger.warning(f"[Finnhub] {ticker} quote 失敗: {safe_msg}")
         return {
             "source": "Finnhub",
-            "error": f"Finnhub API 錯誤: {str(e)}",
+            "error": f"Finnhub API 錯誤: {safe_msg}",
         }
 
 
@@ -114,5 +123,5 @@ async def fetch_finnhub_metrics(ticker: str) -> dict:
         logger.warning(f"[Finnhub] basic_financials {ticker} 逾時（{_FINNHUB_CALL_TIMEOUT}s）")
         return {}
     except Exception as e:
-        logger.warning(f"[Finnhub] basic_financials {ticker} 失敗: {e}")
+        logger.warning(f"[Finnhub] basic_financials {ticker} 失敗: {_sanitize(str(e))}")
         return {}
