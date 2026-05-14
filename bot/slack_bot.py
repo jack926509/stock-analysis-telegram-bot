@@ -46,6 +46,7 @@ from utils.database import (
 from utils.formatter import format_report
 from utils.rate_limiter import rate_limiter
 from utils.signals import compute_signals
+from utils.slack_api import post_message
 from utils.slack_formatter import (
     actions,
     button,
@@ -76,6 +77,14 @@ logger = logging.getLogger(__name__)
 _analysis_semaphore = asyncio.Semaphore(Config.ANALYSIS_CONCURRENCY)
 # (channel, user) → asyncio.Task；/cancel 用
 _running_tasks: dict[tuple[str, str], asyncio.Task] = {}
+# 全域同時排隊上限（防 DoS / OOM）；超過此值直接拒絕新請求
+_MAX_INFLIGHT_TASKS = max(20, Config.ANALYSIS_CONCURRENCY * 10)
+
+
+def _purge_done_tasks() -> None:
+    """清掉 dict 中已結束的 task，避免無限堆積。"""
+    for key in [k for k, t in _running_tasks.items() if t.done()]:
+        _running_tasks.pop(key, None)
 
 # 超時
 FETCH_TIMEOUT = 45
@@ -290,27 +299,24 @@ async def _send_report(
     first_blocks.append(_report_actions_block(ticker, watched=watched))
 
     first_text = fallback_text(first_blocks)
-    head_resp = await client.chat_postMessage(
-        channel=channel,
+    head_resp = await post_message(
+        client, channel,
         text=first_text,
         blocks=first_blocks,
-        unfurl_links=False,
-        unfurl_media=False,
     )
     thread_ts = head_resp.get("ts")
 
-    # 後續訊息切片，全部 thread 中 + 靜音
+    # 後續訊息切片，全部 thread 中 + 靜音；用 retry helper 並間隔 ~100ms 緩解 rate-limit
     body_blocks = mrkdwn_to_blocks(body) if body else []
-    for blocks in split_blocks_into_messages(body_blocks):
-        if not blocks:
-            continue
-        await client.chat_postMessage(
-            channel=channel,
-            thread_ts=thread_ts,
+    chunks = [b for b in split_blocks_into_messages(body_blocks) if b]
+    for i, blocks in enumerate(chunks):
+        if i > 0:
+            await asyncio.sleep(0.1)
+        await post_message(
+            client, channel,
             text=fallback_text(blocks),
             blocks=blocks,
-            unfurl_links=False,
-            unfurl_media=False,
+            thread_ts=thread_ts,
         )
 
 
@@ -818,18 +824,31 @@ async def _dispatch_analysis(
         return
 
     # 並發控制
+    _purge_done_tasks()
+    if len(_running_tasks) >= _MAX_INFLIGHT_TASKS:
+        await post_message(
+            client, channel,
+            text=(
+                f"🛑 系統排隊已滿（{_MAX_INFLIGHT_TASKS} 筆），請稍候 1-2 分鐘再試 "
+                f"`/report {ticker}`"
+            ),
+        )
+        return
     if _analysis_semaphore.locked():
-        await client.chat_postMessage(
-            channel=channel,
-            text=f"⏳ 系統繁忙中，目前有 {Config.ANALYSIS_CONCURRENCY} 筆分析在跑，稍後重試 `/report {ticker}`",
+        await post_message(
+            client, channel,
+            text=(
+                f"⏳ 系統繁忙中，目前有 {Config.ANALYSIS_CONCURRENCY} 筆分析在跑，"
+                f"稍後重試 `/report {ticker}`"
+            ),
         )
         return
 
     key = (channel, user_id)
     existing = _running_tasks.get(key)
     if existing and not existing.done():
-        await client.chat_postMessage(
-            channel=channel,
+        await post_message(
+            client, channel,
             text="⏳ 你已有一筆分析在跑，用 `/cancel` 中止後再重試",
         )
         return

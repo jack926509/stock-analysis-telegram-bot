@@ -18,6 +18,30 @@ logger = logging.getLogger(__name__)
 
 _BASE_URL = "https://financialmodelingprep.com/stable"
 
+# 共用 httpx client（連線池 + keep-alive），避免每次重建 TCP/TLS
+_client: httpx.AsyncClient | None = None
+_client_lock = asyncio.Lock()
+
+
+async def _get_client() -> httpx.AsyncClient:
+    global _client
+    if _client is None:
+        async with _client_lock:
+            if _client is None:
+                _client = httpx.AsyncClient(
+                    timeout=15,
+                    limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+                )
+    return _client
+
+
+def _sanitize_url(url: str) -> str:
+    """避免在 log 中洩漏 apikey。"""
+    key = Config.FMP_API_KEY
+    if key and key in url:
+        return url.replace(key, "***")
+    return url
+
 
 # ── 數值格式化 ──
 
@@ -89,10 +113,11 @@ async def _fmp_get(endpoint: str, **params) -> list | dict:
     qs = {"apikey": Config.FMP_API_KEY}
     qs.update({k: v for k, v in params.items() if v is not None})
 
-    async with httpx.AsyncClient(timeout=15) as client:
-        resp = await client.get(url, params=qs)
+    client = await _get_client()
+    resp = await client.get(url, params=qs)
 
     if resp.status_code != 200:
+        # 不要把 apikey 漏到 exception message
         raise httpx.HTTPStatusError(
             f"FMP {endpoint} {resp.status_code}: {resp.text[:200]}",
             request=resp.request,

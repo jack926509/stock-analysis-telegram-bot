@@ -19,7 +19,6 @@ mplfinance==0.12.10b0
 numpy==2.0.2
 openai>=1.50.0
 pandas==2.3.3
-peewee==4.0.1
 platformdirs==4.4.0
 protobuf==6.33.5
 pycparser==2.23
