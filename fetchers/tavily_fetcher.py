@@ -50,6 +50,7 @@ async def fetch_tavily_news(ticker: str, company_name: str = "") -> dict:
     Returns:
         dict: 包含 AI 摘要和新聞列表
     """
+    global _tavily_key_disabled
     # API key 缺失或被標記為無效時直接降級，避免每次都打到 401 浪費 5s+
     if not Config.TAVILY_API_KEY or _tavily_key_disabled:
         return {
@@ -129,7 +130,6 @@ async def fetch_tavily_news(ticker: str, company_name: str = "") -> dict:
         }
     except Exception as e:
         # 認證錯誤 → 整個 process 停用 Tavily（避免每次 fetch 都打三次 401）
-        global _tavily_key_disabled
         if _looks_like_auth_error(e):
             if not _tavily_key_disabled:
                 logger.error(
