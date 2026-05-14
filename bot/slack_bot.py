@@ -15,7 +15,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-import time
 from datetime import datetime, timezone
 
 from slack_bolt.async_app import AsyncApp
@@ -34,7 +33,7 @@ from fetchers.stooq_fetcher import fetch_stooq_history
 from fetchers.tavily_fetcher import fetch_tavily_news
 from fetchers.tradingview_fetcher import fetch_tradingview_analysis
 from analyzer.llm_analyzer import analyze_stock
-from utils.cache import news_cache, raw_cache, report_cache
+from utils.cache import LRUCache, news_cache, raw_cache, report_cache
 from utils.chart import generate_chart
 from utils.database import (
     add_to_watchlist,
@@ -91,8 +90,9 @@ FETCH_TIMEOUT = 45
 EXTENDED_FETCH_TIMEOUT = 60
 AI_TIMEOUT = 90
 
-_TICKER_PATTERN = re.compile(r"^[A-Z0-9]{1,5}$")
-_TICKER_HINT = "需 1–5 個英文字母或數字，例如 `AAPL`"
+# Ticker 規則：1–5 個英數字，但至少包含 1 個字母（避免 "12345" 這種純數字）
+_TICKER_PATTERN = re.compile(r"^(?=[A-Z0-9]{1,5}$)[A-Z0-9]*[A-Z][A-Z0-9]*$")
+_TICKER_HINT = "需 1–5 個英數字且至少含 1 個字母，例如 `AAPL`"
 
 
 def _validate_ticker(ticker: str) -> bool:
@@ -181,11 +181,9 @@ def _earnings_days(earnings_str) -> int | None:
         return None
 
 
-# sparkline cache（30 分鐘，LRU 上限）
+# sparkline cache（30 分鐘 TTL，LRU 500）
 _SPARK_CHARS = "▁▂▃▄▅▆▇█"
-_SPARK_TTL = 1800
-_SPARK_CACHE_MAX = 500
-_sparkline_cache: dict[str, tuple[str, float]] = {}
+_sparkline_cache = LRUCache(ttl=1800, max_entries=500)
 
 
 def _sparkline(closes: list[float]) -> str:
@@ -201,62 +199,43 @@ def _sparkline(closes: list[float]) -> str:
     )
 
 
-def _spark_set(ticker: str, spark: str) -> None:
-    _sparkline_cache[ticker] = (spark, time.time())
-    if len(_sparkline_cache) > _SPARK_CACHE_MAX:
-        oldest = min(_sparkline_cache.items(), key=lambda kv: kv[1][1])[0]
-        _sparkline_cache.pop(oldest, None)
-
-
 async def _get_sparkline(ticker: str, points: int = 7) -> str:
-    entry = _sparkline_cache.get(ticker)
-    if entry:
-        spark, ts = entry
-        if time.time() - ts < _SPARK_TTL:
-            return spark
+    cached = _sparkline_cache.get(ticker)
+    if cached is not None:
+        return cached  # 可能是 "" 表示已知無資料
     try:
         rows = await fetch_stooq_history(ticker, days=points + 3)
     except Exception as e:
         logger.debug(f"[sparkline] {ticker} history fetch failed: {e}")
         rows = None
     if not rows:
-        _spark_set(ticker, "")
+        _sparkline_cache.set(ticker, "")
         return ""
     closes = [r["close"] for r in rows[-points:]]
     spark = _sparkline(closes)
-    _spark_set(ticker, spark)
+    _sparkline_cache.set(ticker, spark)
     return spark
 
 
 # /watchlist 結果快取（120s，避免短時重複敲指令吃光 FMP 配額）
-_WL_CACHE_TTL = 120
-_WL_CACHE_MAX = 200
-_watchlist_cache: dict[tuple, tuple[dict, float]] = {}
+_watchlist_cache = LRUCache(ttl=120, max_entries=200)
+
+
+def _wl_cache_key(key: tuple) -> str:
+    """tuple → str（LRUCache 用 str key）。"""
+    return "|".join(map(str, key))
 
 
 def _wl_cache_get(key: tuple) -> dict | None:
-    entry = _watchlist_cache.get(key)
-    if not entry:
-        return None
-    data, ts = entry
-    if time.time() - ts > _WL_CACHE_TTL:
-        _watchlist_cache.pop(key, None)
-        return None
-    return data
+    return _watchlist_cache.get(_wl_cache_key(key))  # type: ignore[return-value]
 
 
 def _wl_cache_set(key: tuple, data: dict) -> None:
-    _watchlist_cache[key] = (data, time.time())
-    if len(_watchlist_cache) > _WL_CACHE_MAX:
-        oldest_key = min(_watchlist_cache.items(), key=lambda kv: kv[1][1])[0]
-        _watchlist_cache.pop(oldest_key, None)
+    _watchlist_cache.set(_wl_cache_key(key), data)
 
 
 def _wl_cache_age(key: tuple) -> int | None:
-    entry = _watchlist_cache.get(key)
-    if not entry:
-        return None
-    return int(time.time() - entry[1])
+    return _watchlist_cache.get_age(_wl_cache_key(key))
 
 
 # ══════════════════════════════════════════

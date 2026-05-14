@@ -7,6 +7,7 @@ Financial Modeling Prep (FMP) 數據抓取模組
 
 import asyncio
 import logging
+import time
 
 import httpx
 
@@ -21,6 +22,34 @@ _BASE_URL = "https://financialmodelingprep.com/stable"
 # 共用 httpx client（連線池 + keep-alive），避免每次重建 TCP/TLS
 _client: httpx.AsyncClient | None = None
 _client_lock = asyncio.Lock()
+
+# ── Circuit breaker：連續 N 次 429/5xx 後，60s 內 fail-fast ──
+_CB_THRESHOLD = 5
+_CB_COOLDOWN = 60.0
+_cb_failures = 0
+_cb_open_until: float = 0.0
+
+
+def _cb_should_skip() -> bool:
+    return _cb_open_until > time.monotonic()
+
+
+def _cb_record_failure(status: int | None) -> None:
+    """只有 quota / server-side 錯誤才計入；4xx 客戶端錯誤不算。"""
+    global _cb_failures, _cb_open_until
+    if status is None or status == 429 or 500 <= status < 600:
+        _cb_failures += 1
+        if _cb_failures >= _CB_THRESHOLD:
+            _cb_open_until = time.monotonic() + _CB_COOLDOWN
+            _cb_failures = 0
+            logger.error(
+                f"[FMP] circuit breaker 打開：未來 {int(_CB_COOLDOWN)}s 內所有 FMP 呼叫 fail-fast"
+            )
+
+
+def _cb_record_success() -> None:
+    global _cb_failures
+    _cb_failures = 0
 
 
 async def _get_client() -> httpx.AsyncClient:
@@ -108,15 +137,26 @@ def _ratio_to_pct(val):
 async def _fmp_get(endpoint: str, **params) -> list | dict:
     """
     FMP /stable/{endpoint} GET。錯誤訊息含 endpoint 名與 status。
+    搭配 circuit breaker：連續 5 次 429/5xx → 60s 冷卻。
     """
+    if _cb_should_skip():
+        raise RuntimeError(
+            f"FMP circuit breaker open（剩 {_cb_open_until - time.monotonic():.0f}s）"
+        )
+
     url = f"{_BASE_URL}/{endpoint}"
     qs = {"apikey": Config.FMP_API_KEY}
     qs.update({k: v for k, v in params.items() if v is not None})
 
     client = await _get_client()
-    resp = await client.get(url, params=qs)
+    try:
+        resp = await client.get(url, params=qs)
+    except Exception:
+        _cb_record_failure(None)  # 連線錯誤也算
+        raise
 
     if resp.status_code != 200:
+        _cb_record_failure(resp.status_code)
         # 不要把 apikey 漏到 exception message
         raise httpx.HTTPStatusError(
             f"FMP {endpoint} {resp.status_code}: {resp.text[:200]}",
@@ -126,7 +166,9 @@ async def _fmp_get(endpoint: str, **params) -> list | dict:
 
     data = resp.json()
     if isinstance(data, dict) and data.get("Error Message"):
+        _cb_record_failure(None)
         raise ValueError(f"FMP {endpoint} error: {data['Error Message']}")
+    _cb_record_success()
     return data
 
 

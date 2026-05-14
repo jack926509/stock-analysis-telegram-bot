@@ -11,7 +11,9 @@ from collections import OrderedDict
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_RAW_TTL = 1800      # 30 分鐘
+# raw_cache 與 report_cache 對齊到 10 分鐘：避免「同 ticker 兩次查詢，
+# raw 命中但 report 已過期，導致 AI 重跑燒 token」的 mismatch。
+DEFAULT_RAW_TTL = 600       # 10 分鐘
 DEFAULT_REPORT_TTL = 600    # 10 分鐘（重複查詢直接命中，省 AI 費用）
 DEFAULT_MAX_ENTRIES = 100
 
