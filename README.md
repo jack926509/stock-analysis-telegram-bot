@@ -1,19 +1,19 @@
 <div align="center">
 
-# 📊 美股 Telegram 分析機器人
+# 📊 美股 Slack 分析機器人
 
-**US Stock Analysis Telegram Bot**
+**US Stock Analysis Slack Bot**
 
-基於 RAG + 12 維度量化信號引擎 + Anthropic Claude 四觀點分析  
+基於 RAG + 12 維度量化信號引擎 + OpenAI 四觀點分析  
 所有論點皆需真實數據佐證，原始數據與 AI 分析同步展示供交叉驗證
 
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&logoColor=white)](https://www.python.org/)
-[![Telegram Bot](https://img.shields.io/badge/Telegram-Bot-26A5E4?logo=telegram&logoColor=white)](https://core.telegram.org/bots)
-[![Anthropic Claude](https://img.shields.io/badge/Anthropic-Claude_Sonnet_4-D97757?logo=anthropic&logoColor=white)](https://www.anthropic.com/)
+[![Slack Bolt](https://img.shields.io/badge/Slack-Bolt_Socket_Mode-4A154B?logo=slack&logoColor=white)](https://api.slack.com/start/building/bolt-python)
+[![OpenAI](https://img.shields.io/badge/OpenAI-GPT--4o-412991?logo=openai&logoColor=white)](https://platform.openai.com/)
 [![Deploy on Zeabur](https://img.shields.io/badge/Deploy-Zeabur-7B61FF?logo=zeabur&logoColor=white)](https://zeabur.com/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-[快速開始](#-快速開始) · [指令](#-指令) · [12 維信號引擎](#-12-維度量化信號引擎) · [架構](#-系統架構) · [部署](#️-zeabur-部署) · [更新記錄](#-修改歷程)
+[Slack 設定](#-slack-app-設定一次性) · [快速開始](#-快速開始) · [指令](#-指令) · [12 維信號引擎](#-12-維度量化信號引擎) · [架構](#-系統架構) · [部署](#️-zeabur-部署)
 
 </div>
 
@@ -24,12 +24,97 @@
 - 🔍 **10+ 數據源並行** — Finnhub · FMP · yfinance · TradingView · Tavily · 宏觀 · 分析師 · 內部人 · EPS
 - 🧮 **12 維度量化信號** — 純 Python 規則引擎，獨立於 LLM 的「確定性」共識
 - 🤖 **Claude 四觀點深度分析** — 價值 / 成長 / 技術 / 風險，Prompt Caching + compact context + 噪音過濾三重節流
-- 📑 **`/tenk` 10-K / 10-Q 深度分析** — SEC EDGAR 抓財報 → 章節切割 → 25+ Skill agent 並行 → Eval 自評重跑 → Bull/Bear/紅綠燈 Telegram 摘要
+- 📑 **`/tenk` 10-K / 10-Q 深度分析** — SEC EDGAR 抓財報 → 章節切割 → 25+ Skill agent 並行 → Eval 自評重跑 → Bull/Bear/紅綠燈 Slack 摘要 + 完整 markdown 上傳
+- 💬 **Slack Block Kit 原生互動** — 結論先行卡（會響通知）+ 後續 thread 內補完整報告（不打擾）+ 5 顆操作按鈕（K 線 / SEC / 10-K / 重新分析 / 加入自選）
 - ⭐ **自選股秒覽儀表板** — 總覽列、強弱排序、🚨 警示分組、52w 視覺長條 `▌▌▌░░░░░`、📅 財報臨近、🔄 強刷
 - 🛡️ **反幻覺四層防護** — 缺失即標 `N/A`，原始數據與 AI 分析同步展示供交叉驗證
 - 📈 **K 線圖 + 互動按鈕** — 60 日 MA5/20/60、「加入自選股 / 重新分析」InlineKeyboard
 - ⚡ **非同步 + 三層快取** — `asyncio.gather` 並行；raw 30 分 / report 5 分 / watchlist 120 秒
 - 🏥 **生產級穩定性** — 健康檢查、Rate Limiting、Graceful Shutdown、FMP↔yfinance Fallback
+
+---
+
+## 🔧 Slack App 設定（一次性）
+
+> 部署前必做一次，全程在 https://api.slack.com/apps 完成。約 5 分鐘。
+
+### Step 1 · 建立 Slack App
+
+1. 開 **https://api.slack.com/apps** → **Create New App** → **From scratch**
+2. App Name 填 `Stock Analysis Bot`（可自訂），選擇要安裝的 Workspace → **Create App**
+
+### Step 2 · 啟用 Socket Mode
+
+3. 左側選單 **Socket Mode** → 打開 **Enable Socket Mode**
+4. 系統會要你建立一個 **App-Level Token**：Token Name 填 `socket-token`，
+   勾選 scope **`connections:write`** → **Generate**
+5. 複製出來的 token（**`xapp-…`** 開頭）→ 這就是 `.env` 的 `SLACK_APP_TOKEN`
+
+### Step 3 · 設定 OAuth scopes
+
+6. 左側 **OAuth & Permissions** → 滾到 **Bot Token Scopes** → **Add an OAuth Scope**，
+   依序加入這些 scopes：
+
+   | Scope | 用途 |
+   |---|---|
+   | `app_mentions:read` | 偵測 `@bot 文字` 提及 |
+   | `channels:history` | 讀公開頻道訊息（用於回覆對話） |
+   | `chat:write` | 發送訊息 |
+   | `commands` | 註冊 slash command |
+   | `files:write` | 上傳 K 線圖 PNG |
+   | `groups:history` | 讀私人頻道訊息（如果你打算把 bot 加進私頻） |
+   | `im:history` | 讀 DM 訊息 |
+   | `im:read` | 列出 DM |
+   | `im:write` | 開 DM |
+   | `users:read` | 取用戶資訊 |
+
+### Step 4 · 設定 Event Subscriptions
+
+7. 左側 **Event Subscriptions** → 打開 **Enable Events**（Socket Mode 下不需填 Request URL）
+8. **Subscribe to bot events** 加入：
+
+   | Event | 用途 |
+   |---|---|
+   | `app_mention` | `@bot` 觸發 |
+   | `message.im` | DM 觸發 |
+
+### Step 5 · 註冊 Slash Commands
+
+9. 左側 **Slash Commands** → **Create New Command**，建立以下 13 個指令
+   （Request URL 不填，Socket Mode 不需要）：
+
+   | Command | Short Description | Usage Hint |
+   |---|---|---|
+   | `/report` | 完整深度分析 | `AAPL` |
+   | `/tenk` | 10-K / 10-Q 深度分析（5–15 分鐘） | `AAPL [年份] [Q1\|Q2\|Q3]` |
+   | `/chart` | 60 日 K 線圖 | `AAPL` |
+   | `/compare` | 並排比較 2–5 檔 | `AAPL MSFT NVDA` |
+   | `/news` | 近 7 日新聞 | `AAPL` |
+   | `/watchlist` | 自選股儀表板 | |
+   | `/scan` | 自選股批次快掃 | |
+   | `/watch` | 加入自選股 | `AAPL` |
+   | `/unwatch` | 移除自選股 | `AAPL` |
+   | `/stats` | 個人使用統計 | |
+   | `/cancel` | 中止進行中的分析 | |
+   | `/help` | 指令手冊 | |
+   | `/start` | 歡迎訊息 | |
+
+### Step 6 · 安裝 App 到 Workspace
+
+10. 左側 **Install App** → **Install to Workspace** → **Allow**
+11. 安裝完成後會看到 **Bot User OAuth Token**（**`xoxb-…`** 開頭）→ 這就是 `.env` 的 `SLACK_BOT_TOKEN`
+
+### Step 7 · 建立播報頻道 + 邀請 Bot 進去
+
+12. 回到 Slack 客戶端，在側邊欄 **Channels** 右側 **➕** → **Create channel**
+    - 名稱：例如 `#stock-alerts`
+    - 可選 Public（任何人可加入）或 Private
+13. 進入該頻道，輸入：
+    ```
+    /invite @Stock Analysis Bot
+    ```
+    （或點頻道名稱 → **Integrations** → **Add apps** → 找你的 bot）
+14. 也可直接 DM bot：點左側 **Apps** → 你的 bot → 開始 DM
 
 ---
 
@@ -39,13 +124,14 @@
 
 | Key | 取得位置 | 費用 |
 |---|---|---|
-| `TELEGRAM_BOT_TOKEN` | [@BotFather](https://t.me/BotFather) | 免費 |
+| `SLACK_BOT_TOKEN` (`xoxb-…`) | Slack App > OAuth & Permissions（見上方 Step 6） | 免費 |
+| `SLACK_APP_TOKEN` (`xapp-…`) | Slack App > Basic Information > App-Level Tokens（Step 2） | 免費 |
 | `FINNHUB_API_KEY` | [finnhub.io](https://finnhub.io/) | 免費方案 |
 | `FMP_API_KEY` | [financialmodelingprep.com](https://financialmodelingprep.com/) | 免費 250 次/日 |
 | `TAVILY_API_KEY` | [tavily.com](https://tavily.com/) | 免費方案 |
-| `ANTHROPIC_API_KEY` | [console.anthropic.com](https://console.anthropic.com/) | 按量計費 |
+| `OPENAI_API_KEY` | [platform.openai.com](https://platform.openai.com/api-keys) | 按量計費 |
 
-> 💡 `yfinance` 與 `tradingview-ta` 無需 API Key。
+> 💡 `stooq` 與 `tradingview-ta` 無需 API Key。
 
 ### 2 · 本地啟動
 
@@ -64,6 +150,15 @@ pip install -r requirements.txt
 cp .env.example .env            # 填入上面的 API Keys
 python main.py
 ```
+
+啟動後會看到：
+```
+🚀 正在啟動美股分析 Slack Bot...
+📡 模式: Socket Mode
+✅ Slack Bot 已啟動（Socket Mode）
+```
+
+到剛剛建立的 Slack 頻道輸入 `/report AAPL` 試試。
 
 ### 3 · Zeabur 一鍵部署
 
@@ -230,7 +325,7 @@ stock-analysis-telegram-bot/
 │   ├── section_splitter.py             # LLM 章節切割
 │   ├── agent_runner.py                 # async Anthropic agent + 共用 client
 │   ├── eval_runner.py                  # 自評不足處重跑
-│   ├── report_writer.py                # markdown + Telegram 摘要
+│   ├── report_writer.py                # markdown + Slack 摘要
 │   ├── pipeline_state.py               # checkpoint 續跑
 │   └── skills/                         # 25+ analyst skill prompt（business/risk/mdna…）
 │
@@ -255,7 +350,8 @@ stock-analysis-telegram-bot/
 
 | 變數 | 說明 |
 |---|---|
-| `TELEGRAM_BOT_TOKEN` | BotFather 提供的 Bot Token |
+| `SLACK_BOT_TOKEN` | Bot User OAuth Token（xoxb-…） |
+| `SLACK_APP_TOKEN` | App-Level Token，Socket Mode 用（xapp-…） |
 | `FINNHUB_API_KEY` | Finnhub 即時股價 API |
 | `FMP_API_KEY` | Financial Modeling Prep 基本面 API |
 | `TAVILY_API_KEY` | Tavily 新聞搜尋 API |
@@ -325,7 +421,7 @@ stock-analysis-telegram-bot/
   - **噪音欄位過濾**：18 個對「解讀」零貢獻的欄位（`business_summary` / `description` / `logo_url` / `cusip` / `isin` / `cik` 等）送 AI 前剔除，formatter 仍正常顯示給使用者
   - **Planner → Haiku**：Newsletter 規劃步驟（純 JSON 結構）改用 Haiku 4.5，成本約一個量級
   - **`max_tokens` 收斂**：analyzer 4000→2800、writer 3000→2200、planner 2000→1200
-- **Telegram HTML parse mode**：取代 legacy Markdown，對 `&` / `_` / URL 破版容忍度遠高
+- **Slack Block Kit + mrkdwn**：取代 legacy Markdown，對 `&` / `_` / URL 破版容忍度遠高
 - **規則引擎 + LLM 分工**：純 Python 先算信號共識，LLM 只負責「解讀與交叉驗證」，降低幻覺
 - **三層快取**：raw 30 分（API 數據）/ report 5 分（成品報告）/ watchlist 120 秒（per-user 報價結果）
 - **Per-user rate limit + Semaphore(3)**：防單用戶濫用 + 全域並發上限
@@ -339,7 +435,7 @@ stock-analysis-telegram-bot/
 **新增管線**（`tenk/` 套件，源自 [twCarllin/10k-analysis](https://github.com/twCarllin/10k-analysis) 重構為 async）
 - `/tenk TICKER [年份] [Q1|Q2|Q3]` — SEC EDGAR 抓財報 → markitdown 轉純文字 → LLM 章節切割 → **25+ Skill agent 並行**（業務 / 風險 / MD&A / 財務 / 不尋常項目 / 重估值 / 競爭對手 / 供應鏈 / 公司治理 …）→ Eval 自評不足處重跑 → **Bull/Bear 三點摘要 + 紅綠燈**
 - 全面改寫為 async：`asyncio.gather` + `Semaphore` 取代 `ThreadPoolExecutor`，與 bot 共用 `utils.ai_client` 享 Prompt Cache
-- 移除 PDF 輸出（weasyprint / matplotlib），純 markdown + Telegram HTML 摘要
+- 移除 PDF 輸出（weasyprint / matplotlib），純 markdown + Slack Block Kit 摘要
 
 **Bot 整合**（`bot/tenk_handler.py`）
 - **背景任務 + 進度回呼**：`asyncio.create_task` 不阻塞，5–15 分鐘期間每 1.5 秒 throttle 更新一次階段（fetch → sections → phase1/2/3 → eval → synth → report）
@@ -438,7 +534,7 @@ OpenAI → Anthropic Claude；200K context window；`system` 參數獨立於 mes
 
 ### 💬 UX / 互動
 - [ ] **Progressive disclosure**：Verdict Card → 分頁展開（基本面 / 技術面 / Smart Money / 信號 / 新聞 / AI）
-- [ ] **Telegram Mini App** — 自選股管理 Web UI
+- [ ] **Slack App Home Tab** — 自選股管理 Web UI
 - [ ] **定時推送** — 盤前 / 盤後自動推個股報告
 - [ ] **i18n** — 英文 UI
 

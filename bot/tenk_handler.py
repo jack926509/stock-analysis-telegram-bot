@@ -1,46 +1,53 @@
 """
-/tenk Telegram handler — 10-K / 10-Q 深度分析背景任務。
+/tenk Slack handler — 10-K / 10-Q 深度分析背景任務。
 
 設計重點：
-- 立即回覆「啟動中」訊息，pipeline 在 asyncio.create_task 背景跑，不擋其他指令
-- 進度透過 edit_message_text 持續更新
-- 全 bot 同時最多 1 件 tenk 任務（獨立 semaphore）
+- Slash command 立即 ack，pipeline 在 asyncio.create_task 背景跑
+- 進度透過 chat_update 持續更新（throttle 1.5s）
+- 全 bot 同時最多 1 件 tenk 任務（獨立 semaphore，避免 SEC EDGAR 阻擋）
 - 每用戶每日次數限制 + 半年內報告快取（DB 記錄）
 - 30 分鐘整體逾時保護
 """
 
+from __future__ import annotations
+
 import asyncio
-import html
 import logging
 import re
+import time
 from datetime import datetime
 from pathlib import Path
 
-from telegram import Update
-from telegram.constants import ParseMode
-from telegram.ext import ContextTypes
+from slack_sdk.web.async_client import AsyncWebClient
 
 from config import Config
 from utils.database import (
     tenk_get_cached_report,
-    tenk_save_report,
     tenk_get_daily_count,
     tenk_increment_daily,
+    tenk_save_report,
+)
+from utils.slack_formatter import (
+    actions,
+    button,
+    context,
+    divider,
+    escape_mrkdwn,
+    header,
+    html_to_mrkdwn,
+    mrkdwn_to_blocks,
+    section,
 )
 
 logger = logging.getLogger(__name__)
 
 # 全 bot 同時最多 1 件 tenk（pipeline 重 + 防止 SEC EDGAR 阻擋）
 _tenk_semaphore = asyncio.Semaphore(1)
-_inflight_users: set[int] = set()
+_inflight_users: set[str] = set()
 
 _TICKER_PATTERN = re.compile(r"^[A-Z0-9]{1,5}$")
 _QUARTER_PATTERN = re.compile(r"^Q[1-3]$", re.IGNORECASE)
 
-
-# ────────────────────────────────────────────
-# 進度文案
-# ────────────────────────────────────────────
 
 _STAGE_LABELS = {
     "fetch":          "📡 下載 SEC 財務數據",
@@ -60,12 +67,6 @@ _STAGE_LABELS = {
 }
 
 
-def _h(value) -> str:
-    if value is None:
-        return ""
-    return html.escape(str(value), quote=False)
-
-
 def _validate_ticker(ticker: str) -> bool:
     return bool(_TICKER_PATTERN.match(ticker))
 
@@ -75,90 +76,61 @@ def _default_year() -> int:
     return datetime.utcnow().year - 1
 
 
-# ────────────────────────────────────────────
-# /tenk 指令
-# ────────────────────────────────────────────
+def parse_tenk_args(args_text: str) -> tuple[str | None, int, str | None, str | None]:
+    """解析 /tenk 參數字串。回傳 (ticker, year, quarter, error)。"""
+    parts = (args_text or "").strip().split()
+    if not parts:
+        return None, 0, None, "usage"
 
-
-async def tenk_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/tenk TICKER [YEAR] [Q1|Q2|Q3]"""
-    if not Config.TENK_ENABLED:
-        await update.message.reply_text("ℹ️ 10-K 深度分析功能目前未啟用")
-        return
-
-    if not context.args:
-        await update.message.reply_text(
-            "❌ 用法：<code>/tenk AAPL</code>\n"
-            "  指定年份：<code>/tenk AAPL 2024</code>\n"
-            "  指定季度：<code>/tenk AAPL 2025 Q1</code>",
-            parse_mode=ParseMode.HTML,
-        )
-        return
-
-    args = list(context.args)
-    ticker = args[0].upper()
+    ticker = parts[0].upper()
     if not _validate_ticker(ticker):
-        await update.message.reply_text("❌ 無效的股票代碼")
-        return
+        return None, 0, None, "❌ 無效的股票代碼"
 
     year = _default_year()
-    quarter = None
-
-    if len(args) >= 2:
+    quarter: str | None = None
+    if len(parts) >= 2:
         try:
-            year = int(args[1])
+            year = int(parts[1])
         except ValueError:
-            await update.message.reply_text("❌ 年份格式錯誤，例如：2024")
-            return
+            return None, 0, None, "❌ 年份格式錯誤，例如：2024"
         if year < 2000 or year > datetime.utcnow().year:
-            await update.message.reply_text("❌ 年份超出合理範圍")
-            return
+            return None, 0, None, "❌ 年份超出合理範圍"
 
-    if len(args) >= 3:
-        q = args[2].upper()
+    if len(parts) >= 3:
+        q = parts[2].upper()
         if not _QUARTER_PATTERN.match(q):
-            await update.message.reply_text("❌ 季度格式應為 Q1 / Q2 / Q3")
-            return
+            return None, 0, None, "❌ 季度格式應為 Q1 / Q2 / Q3"
         quarter = q
 
-    await dispatch_tenk_analysis(
-        chat_id=update.effective_chat.id,
-        user_id=update.effective_user.id,
-        ticker=ticker,
-        bot=context.bot,
-        year=year,
-        quarter=quarter,
-    )
+    return ticker, year, quarter, None
 
 
 async def dispatch_tenk_analysis(
     *,
-    chat_id: int,
-    user_id: int,
+    client: AsyncWebClient,
+    channel: str,
+    user_id: str,
     ticker: str,
-    bot,
     year: int | None = None,
     quarter: str | None = None,
 ) -> None:
-    """共用入口：/tenk 指令與 [📋 10K] 按鈕都走這裡。"""
+    """共用入口：/tenk 與 [📋 10-K 深度] 按鈕都走這裡。"""
     if not Config.TENK_ENABLED:
-        await bot.send_message(chat_id=chat_id, text="ℹ️ 10-K 深度分析功能目前未啟用")
+        await client.chat_postMessage(channel=channel, text="ℹ️ 10-K 深度分析功能目前未啟用")
         return
-
     if not _validate_ticker(ticker):
-        await bot.send_message(chat_id=chat_id, text="❌ 無效的股票代碼")
+        await client.chat_postMessage(channel=channel, text="❌ 無效的股票代碼")
         return
 
     if year is None:
         year = _default_year()
     filing_type = "10-Q" if quarter else "10-K"
 
-    # Atomic check-and-add：在進入任何 await 之前同步搶占 inflight 標記，
-    # 否則兩個並發請求可能都通過 `if user_id in _inflight_users` 檢查。
+    # Atomic check-and-add：在進入 await 之前同步搶占 inflight 標記
     if user_id in _inflight_users:
-        await bot.send_message(
-            chat_id=chat_id,
-            text="⏳ 你已經有一個 10-K 分析在進行中，請等它完成再開新的",
+        await client.chat_postMessage(
+            channel=channel,
+            text="⏳ 你已有一個 10-K 分析在進行中，請等它完成再開新的",
         )
         return
     _inflight_users.add(user_id)
@@ -167,11 +139,11 @@ async def dispatch_tenk_analysis(
     try:
         used = await tenk_get_daily_count(user_id)
         if used >= Config.TENK_DAILY_LIMIT:
-            await bot.send_message(
-                chat_id=chat_id,
+            await client.chat_postMessage(
+                channel=channel,
                 text=(
-                    f"⚠️ 今日 10-K 深度分析已用完（{used}/{Config.TENK_DAILY_LIMIT}）\n"
-                    f"明日 UTC 00:00 重置"
+                    f"⚠️ 今日 10-K 深度分析已用完（{used}/{Config.TENK_DAILY_LIMIT}），"
+                    "明日 UTC 00:00 重置"
                 ),
             )
             return
@@ -180,47 +152,48 @@ async def dispatch_tenk_analysis(
             ticker, year, filing_type, quarter, Config.TENK_REPORT_TTL_DAYS,
         )
         if cached:
-            await _send_cached_via_bot(bot, chat_id, ticker, year, filing_type, quarter, cached)
+            await _send_cached(client, channel, ticker, year, filing_type, quarter, cached)
             return
 
         label = filing_type + (f" {quarter}" if quarter else "")
-        loading = await bot.send_message(
-            chat_id=chat_id,
-            text=(
-                f"🔍 <b>{_h(ticker)} {_h(year)} {_h(label)}</b> 深度分析啟動\n"
-                f"預估 8-15 分鐘，完成後會主動推送\n"
-                f"你可以繼續用其他指令"
-            ),
-            parse_mode=ParseMode.HTML,
+        loading = await client.chat_postMessage(
+            channel=channel,
+            text=f"🔍 {ticker} {year} {label} 深度分析啟動",
+            blocks=[
+                header(f"🔍 {ticker} {year} {label} 深度分析啟動"),
+                section(
+                    "預估 *8–15 分鐘*，完成後會在本對話推送。\n"
+                    "你可以繼續用其他指令（/report、/news 等）。"
+                ),
+            ],
         )
+        loading_ts = loading.get("ts")
 
         asyncio.create_task(
             _run_tenk_background(
-                chat_id=chat_id,
+                client=client,
+                channel=channel,
                 user_id=user_id,
                 ticker=ticker,
                 year=year,
                 filing_type=filing_type,
                 quarter=quarter,
-                loading_message=loading,
-                bot=bot,
+                loading_ts=loading_ts,
             )
         )
-        # 背景 task 接管所有權，由其 finally 負責 discard
         background_owns_flag = True
     finally:
         if not background_owns_flag:
             _inflight_users.discard(user_id)
 
 
-async def get_tenk_quota(user_id: int) -> tuple[int, int]:
-    """回傳 (used, limit) — 給 [📋 10K] callback 顯示配額。"""
+async def get_tenk_quota(user_id: str) -> tuple[int, int]:
+    """回傳 (used, limit) — 給 [📋 10-K] callback 顯示配額。"""
     used = await tenk_get_daily_count(user_id)
     return used, Config.TENK_DAILY_LIMIT
 
 
-async def _send_cached_via_bot(bot, chat_id, ticker, year, filing_type, quarter, cached) -> None:
-    """callback / dispatch 走這條（純 bot+chat_id 版）。"""
+async def _send_cached(client, channel, ticker, year, filing_type, quarter, cached) -> None:
     age = "—"
     try:
         created = datetime.fromisoformat(cached["created_at"].replace("Z", "+00:00"))
@@ -229,76 +202,73 @@ async def _send_cached_via_bot(bot, chat_id, ticker, year, filing_type, quarter,
     except Exception:
         pass
 
-    await bot.send_message(
-        chat_id=chat_id,
-        text=f"⚡ 快取 ({age}，半年內不重跑)",
-        disable_notification=True,
-    )
-    await bot.send_message(
-        chat_id=chat_id,
-        text=cached["summary"],
-        parse_mode=ParseMode.HTML,
-        disable_web_page_preview=True,
+    label = filing_type + (f" {quarter}" if quarter else "")
+    summary_mrkdwn = html_to_mrkdwn(cached["summary"])
+
+    await client.chat_postMessage(
+        channel=channel,
+        text=f"⚡ {ticker} {year} {label} 快取命中 ({age})",
+        blocks=[
+            header(f"📋 {ticker} {year} {label}"),
+            context([f":zap: 快取 *{age}*（半年內不重跑）"]),
+            divider(),
+            *mrkdwn_to_blocks(summary_mrkdwn),
+        ],
     )
     md_path = Path(cached["report_md_path"])
     if md_path.exists():
-        await bot.send_document(
-            chat_id=chat_id,
-            document=md_path.open("rb"),
+        await client.files_upload_v2(
+            channel=channel,
+            file=str(md_path),
             filename=md_path.name,
-            caption=f"📑 {ticker} {year} {filing_type}{(' ' + quarter) if quarter else ''} 完整報告",
+            title=f"{ticker} {year} {label} 完整報告",
+            initial_comment=f"📑 完整 markdown 報告：*{ticker} {year} {label}*",
         )
 
 
-
-
-# ────────────────────────────────────────────
-# 背景執行
-# ────────────────────────────────────────────
-
-
 async def _run_tenk_background(
-    *, chat_id, user_id, ticker, year, filing_type, quarter, loading_message, bot,
+    *, client: AsyncWebClient, channel: str, user_id: str,
+    ticker: str, year: int, filing_type: str, quarter: str | None,
+    loading_ts: str | None,
 ) -> None:
     """asyncio.create_task 跑這個。失敗會 catch 並回友善訊息。"""
     label = filing_type + (f" {quarter}" if quarter else "")
 
-    if _tenk_semaphore.locked():
-        try:
-            await loading_message.edit_text(
-                f"⏳ <b>{_h(ticker)} {_h(year)} {_h(label)}</b>\n"
-                f"目前有其他 10-K 分析進行中，排隊等待…",
-                parse_mode=ParseMode.HTML,
-            )
-        except Exception as e:
-            logger.debug(f"[tenk] {ticker} queue-status edit failed: {e}")
+    if _tenk_semaphore.locked() and loading_ts:
+        await _safe_update(
+            client, channel, loading_ts,
+            text=f"⏳ {ticker} {year} {label} — 排隊等待中…",
+            blocks=[
+                header(f"⏳ {ticker} {year} {label}"),
+                section("目前有其他 10-K 分析進行中，*排隊等待…*"),
+            ],
+        )
 
     async with _tenk_semaphore:
         try:
-            # 進度 callback：以 throttle 機制更新 loading message，避免 hit Telegram rate
             last_edit = {"ts": 0.0}
 
             async def _progress(stage: str, detail: str | None = None) -> None:
-                import time
                 now = time.time()
-                if now - last_edit["ts"] < 1.5:  # 至少 1.5s 才更新一次
+                if now - last_edit["ts"] < 1.5:
                     return
                 last_edit["ts"] = now
+                if not loading_ts:
+                    return
                 title = _STAGE_LABELS.get(stage, stage)
-                text = (
-                    f"⏳ <b>{_h(ticker)} {_h(year)} {_h(label)}</b>\n"
-                    f"{title}"
-                )
+                blocks = [
+                    header(f"⏳ {ticker} {year} {label}"),
+                    section(f"*{title}*"),
+                ]
                 if detail:
-                    text += f"\n<i>{_h(detail)}</i>"
-                try:
-                    await loading_message.edit_text(text, parse_mode=ParseMode.HTML)
-                except Exception as e:
-                    # 多半是 Telegram「message is not modified」或 rate limit；
-                    # 進度更新不應中斷主 pipeline，但需可觀測。
-                    logger.debug(f"[tenk] {ticker} progress edit failed ({stage}): {e}")
+                    blocks.append(context([f"_{escape_mrkdwn(detail)}_"]))
+                await _safe_update(
+                    client, channel, loading_ts,
+                    text=f"{title} — {ticker} {year} {label}",
+                    blocks=blocks,
+                )
 
-            # 真正執行（lazy import 避免 bot 啟動就載入重依賴）
+            # lazy import：避免 bot 啟動就載入重依賴
             from tenk.pipeline import run_tenk_analysis
 
             result = await asyncio.wait_for(
@@ -310,7 +280,6 @@ async def _run_tenk_background(
                 timeout=Config.TENK_PIPELINE_TIMEOUT,
             )
 
-            # 寫快取與計數
             await tenk_save_report(
                 ticker, year, filing_type, quarter,
                 str(result["report_md"]),
@@ -319,63 +288,93 @@ async def _run_tenk_background(
             )
             new_count = await tenk_increment_daily(user_id)
             logger.info(
-                f"[tenk] {ticker} {year} {label} 完成 user={user_id} "
-                f"daily={new_count}/{Config.TENK_DAILY_LIMIT}"
+                "tenk_done",
+                extra={"ticker": ticker, "year": year, "label": label,
+                       "user": user_id, "daily": f"{new_count}/{Config.TENK_DAILY_LIMIT}"}
             )
 
-            # 收尾：刪 loading、推摘要、推 md 檔
-            try:
-                await loading_message.delete()
-            except Exception as e:
-                logger.debug(f"[tenk] {ticker} loading message delete failed: {e}")
+            if loading_ts:
+                try:
+                    await client.chat_delete(channel=channel, ts=loading_ts)
+                except Exception as e:
+                    logger.debug(f"[tenk] {ticker} loading delete failed: {e}")
 
-            await bot.send_message(
-                chat_id=chat_id,
-                text=result["summary"],
-                parse_mode=ParseMode.HTML,
-                disable_web_page_preview=True,
+            summary_mrkdwn = html_to_mrkdwn(result["summary"])
+            await client.chat_postMessage(
+                channel=channel,
+                text=f"✅ {ticker} {year} {label} 深度分析完成",
+                blocks=[
+                    header(f"✅ {ticker} {year} {label} 深度分析完成"),
+                    *mrkdwn_to_blocks(summary_mrkdwn),
+                    context([f":bar_chart: 今日已使用 *{new_count}/{Config.TENK_DAILY_LIMIT}*"]),
+                ],
             )
 
             md_path: Path = result["report_md"]
             if md_path.exists():
-                await bot.send_document(
-                    chat_id=chat_id,
-                    document=md_path.open("rb"),
+                await client.files_upload_v2(
+                    channel=channel,
+                    file=str(md_path),
                     filename=md_path.name,
-                    caption=(
-                        f"📑 {ticker} {year} {label} 完整報告（markdown）\n"
-                        f"今日已使用 {new_count}/{Config.TENK_DAILY_LIMIT}"
-                    ),
+                    title=f"{ticker} {year} {label} 完整報告",
+                    initial_comment=f"📑 *{ticker} {year} {label}* 完整 markdown 報告",
                 )
 
         except asyncio.TimeoutError:
             logger.error(f"[tenk] {ticker} {year} {label} 逾時")
-            await _safe_edit(
-                loading_message,
-                f"❌ <b>{_h(ticker)} {_h(year)}</b> 分析逾時（超過 30 分鐘）\n請稍後重試",
+            await _safe_update(
+                client, channel, loading_ts,
+                text=f"❌ {ticker} {year} 分析逾時",
+                blocks=[
+                    header(f"❌ {ticker} {year} 分析逾時"),
+                    section("超過 30 分鐘，請稍後重試"),
+                ],
             )
-
         except FileNotFoundError as exc:
-            await _safe_edit(
-                loading_message,
-                f"❌ 找不到 <b>{_h(ticker)} {_h(year)} {_h(label)}</b>\n"
-                f"<i>{_h(str(exc))}</i>\n"
-                f"可能尚未公布，或年份/季度不正確",
+            await _safe_update(
+                client, channel, loading_ts,
+                text=f"❌ 找不到 {ticker} {year} {label}",
+                blocks=[
+                    header(f"❌ 找不到 {ticker} {year} {label}"),
+                    section(f"_{escape_mrkdwn(str(exc))}_"),
+                    context(["可能尚未公布，或年份/季度不正確"]),
+                ],
             )
-
         except Exception as exc:
             logger.error(f"[tenk] {ticker} 失敗: {exc}", exc_info=True)
-            await _safe_edit(
-                loading_message,
-                f"❌ <b>{_h(ticker)}</b> 分析失敗\n<code>{_h(str(exc)[:200])}</code>",
+            await _safe_update(
+                client, channel, loading_ts,
+                text=f"❌ {ticker} 分析失敗",
+                blocks=[
+                    header(f"❌ {ticker} 分析失敗"),
+                    section(f"`{escape_mrkdwn(str(exc)[:200])}`"),
+                ],
             )
-
         finally:
             _inflight_users.discard(user_id)
 
 
-async def _safe_edit(message, text: str) -> None:
+async def _safe_update(
+    client: AsyncWebClient,
+    channel: str,
+    ts: str | None,
+    *,
+    text: str,
+    blocks: list[dict] | None = None,
+) -> None:
+    if not ts:
+        return
     try:
-        await message.edit_text(text, parse_mode=ParseMode.HTML)
+        await client.chat_update(channel=channel, ts=ts, text=text, blocks=blocks)
     except Exception as e:
-        logger.debug(f"[tenk] safe edit failed: {e}")
+        logger.debug(f"[tenk] safe_update failed: {e}")
+
+
+# 給 slack_bot.py 重複使用
+__all__ = [
+    "dispatch_tenk_analysis",
+    "get_tenk_quota",
+    "parse_tenk_args",
+    "actions",
+    "button",
+]
