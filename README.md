@@ -162,9 +162,13 @@ python main.py
 
 ### 3 · Zeabur 一鍵部署
 
-1. [Zeabur](https://zeabur.com/) → New Project → Import from GitHub
-2. 選擇此 repo，在 **Variables** 頁填入必要 API Keys（見[環境變數](#️-環境變數)）
-3. Deploy — `zbpack.json` 已預先設好建構與啟動指令
+1. [Zeabur](https://zeabur.com/) → New Project → Import from GitHub，選擇此 repo
+2. **加 Postgres add-on**：在同一個 Project 點 **+ Add Service → Marketplace → PostgreSQL**
+   - 建好後 Zeabur 會在「服務變數」面板自動產出 `DATABASE_URL` 給其他服務取用
+3. 回到 bot 服務 → **Variables** → 點 `DATABASE_URL` 變數 → 來源選 **Reference from another service** → 選剛建的 Postgres 服務的 `DATABASE_URL`（或直接貼 `${POSTGRES.DATABASE_URL}`）
+4. 同頁填入其餘 API Keys（見[環境變數](#️-環境變數)）
+5. Deploy — `zbpack.json` 已預先設好建構與啟動指令
+6. 啟動 log 應出現 `✅ Postgres 連線池已就緒並完成 schema migration`（schema 第一次自動建立，之後重啟 idempotent）
 
 ---
 
@@ -336,7 +340,7 @@ stock-analysis-telegram-bot/
     ├── chart.py                        # 📈 mplfinance K 線圖
     ├── cache.py                        # 💾 LRU 分層快取（raw 30m / report 5m）
     ├── retry.py                        # 🔁 指數退避重試
-    ├── database.py                     # 🗃 SQLite 自選股 + 查詢歷史 + tenk 報告/配額
+    ├── database.py                     # 🗃 Postgres (asyncpg) 自選股 + 查詢歷史 + tenk 報告/配額
     ├── rate_limiter.py                 # ⏱ 滑動窗口 per-user 限流
     └── health.py                       # 🏥 HTTP /health 端點
 ```
@@ -373,7 +377,9 @@ stock-analysis-telegram-bot/
 | `HEALTH_PORT` | `8080` | HTTP 端口 |
 | `RATE_LIMIT_PER_MINUTE` | `5` | 每用戶每分鐘請求上限 |
 | `CACHE_TTL` | `300` | 報告快取秒數 |
-| `DB_PATH` | `bot_data.db` | SQLite 檔案路徑 |
+| `DATABASE_URL` | — | **必填**。Postgres DSN，格式 `postgresql://user:pass@host:5432/dbname`。Zeabur Postgres add-on 會自動注入 |
+| `DB_POOL_MIN` / `DB_POOL_MAX` | `1` / `10` | asyncpg 連線池大小 |
+| `DB_POOL_TIMEOUT` | `30` | 連線取得逾時秒數 |
 | `PEER_COMPARISON_ENABLED` | `true` | 啟用同業比較 |
 | `HISTORY_ENABLED` | `true` | 啟用歷史回測 |
 | `NEWSLETTER_ENABLED` | `true` | 啟動時生成日報（目前僅 log，未推送） |
@@ -409,7 +415,7 @@ stock-analysis-telegram-bot/
 | 新聞 | Tavily |
 | K 線圖 | mplfinance |
 | 非同步 | `asyncio` + `asyncio.to_thread` |
-| 儲存 | SQLite（WAL 模式） |
+| 儲存 | PostgreSQL（asyncpg pool；自動 schema migration） |
 | 部署 | Zeabur |
 
 ### 關鍵設計決策

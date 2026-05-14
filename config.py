@@ -79,8 +79,18 @@ class Config:
     # ── 並發控制 ──
     ANALYSIS_CONCURRENCY: int = _int("ANALYSIS_CONCURRENCY", 3)
 
-    # ── 資料庫 ──
-    DB_PATH: str = os.getenv("DB_PATH", "bot_data.db")
+    # ── 資料庫（Postgres）──
+    # 標準 DSN：postgresql://user:pass@host:5432/dbname
+    # Zeabur Postgres add-on 會自動注入 DATABASE_URL；若沒注入會回退到 POSTGRES_CONNECTION_STRING
+    DATABASE_URL: str = (
+        os.getenv("DATABASE_URL")
+        or os.getenv("POSTGRES_CONNECTION_STRING", "")
+    )
+    # 連線池大小
+    DB_POOL_MIN: int = _int("DB_POOL_MIN", 1)
+    DB_POOL_MAX: int = _int("DB_POOL_MAX", 10)
+    # 連線取得逾時（秒）— 避免在 pool 滿時無限等待
+    DB_POOL_TIMEOUT: int = _int("DB_POOL_TIMEOUT", 30)
 
     # ── 快取 ──
     CACHE_TTL: int = _int("CACHE_TTL", 300)
@@ -114,6 +124,8 @@ class Config:
             missing.append("TAVILY_API_KEY")
         if not cls.OPENAI_API_KEY:
             missing.append("OPENAI_API_KEY")
+        if not cls.DATABASE_URL:
+            missing.append("DATABASE_URL (postgresql://user:pass@host:5432/dbname)")
 
         if cls.SLACK_BOT_TOKEN and not cls.SLACK_BOT_TOKEN.startswith("xoxb-"):
             missing.append("SLACK_BOT_TOKEN 應以 xoxb- 開頭")
