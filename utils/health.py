@@ -51,15 +51,16 @@ async def readiness_handler(request: web.Request) -> web.Response:
     """Readiness：檢查 DB 連通。失敗回 503。"""
     body: dict = {"status": "ready", **_uptime_dict()}
     try:
-        # 延遲 import 避免循環相依
-        from utils.database import _pool  # type: ignore
-        if _pool is None:
+        # 用模組屬性而非 from-import，確保拿到最新 _pool（init_db 完成後才會非 None）
+        from utils import database as _db_mod  # 延遲 import 避免循環相依
+        pool = getattr(_db_mod, "_pool", None)
+        if pool is None:
             body["status"] = "not_ready"
             body["reason"] = "db_pool_not_initialized"
             return web.json_response(body, status=503)
 
         async def _ping():
-            async with _pool.acquire() as conn:
+            async with pool.acquire() as conn:
                 await conn.fetchval("SELECT 1")
 
         await asyncio.wait_for(_ping(), timeout=_DB_PING_TIMEOUT)

@@ -44,12 +44,15 @@ def _setup_logging() -> None:
 async def _run() -> None:
     """非同步啟動 Bot（Postgres pool + Socket Mode + 健康檢查 + Graceful Shutdown）。"""
     # 1. Postgres pool + schema migration（最先做，後面所有 handler 都依賴它）
-    #    用 timeout 包住避免 DB 卡死導致 Zeabur 健康檢查反覆失敗 → 容器重啟迴圈
+    #    給 90s buffer 以容忍 Zeabur Postgres 冷啟動；超過就放棄並退出讓 Zeabur 重啟
     from utils.database import init_db
     try:
-        await asyncio.wait_for(init_db(), timeout=30)
+        await asyncio.wait_for(init_db(), timeout=90)
     except asyncio.TimeoutError:
-        logger.error("❌ init_db 逾時（30s），Postgres 連線或 migration 卡住，退出讓 Zeabur 重啟")
+        logger.error("❌ init_db 逾時（90s），Postgres 不可達；退出讓 Zeabur 重啟容器")
+        sys.exit(1)
+    except Exception as e:
+        logger.error(f"❌ init_db 失敗: {e}", exc_info=True)
         sys.exit(1)
 
     # 2. 健康檢查
